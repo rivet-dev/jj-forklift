@@ -1938,8 +1938,15 @@ fn get_stack(
 
     diagnostics.phase("resolve-prs");
     let mut prs = Vec::new();
-    for pr_number in pr_numbers {
+    let progress = diagnostics.progress_bar("Fetching", "pull requests", pr_numbers.len());
+    for (index, pr_number) in pr_numbers.into_iter().enumerate() {
         prs.push(fetch_pr_by_number(runner, &github, "get", pr_number)?);
+        if let Some(progress) = &progress {
+            progress.set_position((index + 1) as u64);
+        }
+    }
+    if let Some(progress) = progress {
+        ui_finish_progress_bar(progress);
     }
     validate_get_pr_stack(config, &github, target_pr_number, &prs)?;
 
@@ -5595,7 +5602,8 @@ fn submit_stack(
 
     let mut entries = Vec::new();
 
-    for plan in plans {
+    let pr_progress = diagnostics.progress_bar("Submitting", "pull requests", plans.len());
+    for (index, plan) in plans.into_iter().enumerate() {
         let previous_comment_id = plan
             .existing_pr
             .as_ref()
@@ -5631,6 +5639,12 @@ fn submit_stack(
             diagnostics,
         )?;
         entries.push((plan.change.clone(), entry));
+        if let Some(progress) = &pr_progress {
+            progress.set_position((index + 1) as u64);
+        }
+    }
+    if let Some(progress) = pr_progress {
+        ui_finish_progress_bar(progress);
     }
 
     diagnostics.phase("stack-comments");
@@ -5638,7 +5652,8 @@ fn submit_stack(
         .iter()
         .map(|(change, entry)| (change.change_id.clone(), entry.clone()))
         .collect::<Vec<_>>();
-    for (change, mut entry) in entries {
+    let comment_progress = diagnostics.progress_bar("Updating", "stack comments", entries.len());
+    for (index, (change, mut entry)) in entries.into_iter().enumerate() {
         let body = stack_comment_body_with_frozen(
             context,
             &frozen_entries,
@@ -5676,6 +5691,12 @@ fn submit_stack(
             entry,
             diagnostics,
         )?;
+        if let Some(progress) = &comment_progress {
+            progress.set_position((index + 1) as u64);
+        }
+    }
+    if let Some(progress) = comment_progress {
+        ui_finish_progress_bar(progress);
     }
 
     Ok(summary)
@@ -6090,9 +6111,16 @@ fn push_changed_heads(
         return Ok(());
     }
 
-    for plan in &changed {
+    let progress = diagnostics.progress_bar("Pushing", "bookmarks", changed.len());
+    for (index, plan) in changed.iter().enumerate() {
         set_submit_bookmark(runner, plan, diagnostics)?;
         push_submit_bookmark(runner, config, plan, diagnostics)?;
+        if let Some(progress) = &progress {
+            progress.set_position((index + 1) as u64);
+        }
+    }
+    if let Some(progress) = progress {
+        ui_finish_progress_bar(progress);
     }
 
     Ok(())
