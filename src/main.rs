@@ -5507,6 +5507,8 @@ fn submit_stack(
     diagnostics.phase("validate-submit-bases");
     validate_submit_bases(runner, config, &context.stack, &context.frozen_dependencies)
         .map_err(|error| phase_error("validate-submit-bases", "stack", error))?;
+    validate_submit_descriptions(&context.stack)
+        .map_err(|error| phase_error("validate-submit-bases", "stack", error))?;
 
     diagnostics.phase("plan-submit");
     let mut store = CacheStore::load_current_best_effort(runner, diagnostics, "plan-submit")
@@ -6049,6 +6051,36 @@ fn validate_submit_bases(
     }
 
     Ok(())
+}
+
+/// Rejects a stack up front if any change has no description. jj refuses to push
+/// an undescribed commit, but it only errors at push time — partway through the
+/// push loop, after earlier branches are already on the remote. Catching it here
+/// (before `push-refs`) fails cleanly with zero side effects.
+#[tracing::instrument(skip_all)]
+fn validate_submit_descriptions(stack: &[ResolvedChange]) -> Result<()> {
+    let undescribed = stack
+        .iter()
+        .filter(|change| change.title.trim().is_empty())
+        .collect::<Vec<_>>();
+    if undescribed.is_empty() {
+        return Ok(());
+    }
+
+    let list = undescribed
+        .iter()
+        .map(|change| format!("{} ({})", change.change_id, change.commit_id))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let revs = undescribed
+        .iter()
+        .map(|change| change.change_id.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    bail!(
+        "cannot submit: {} change(s) have no description and jj refuses to push undescribed commits: {list}. Describe them first, e.g. `jj describe -r {revs}`.",
+        undescribed.len()
+    );
 }
 
 #[tracing::instrument(level = "trace", skip_all, fields(left = %left, right = %right))]

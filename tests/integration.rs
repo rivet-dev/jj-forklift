@@ -256,6 +256,40 @@ fn submit_refuses_open_branch_pr_without_local_bookmark() -> anyhow::Result<()> 
 }
 
 #[test]
+fn submit_refuses_undescribed_commit_before_pushing() -> anyhow::Result<()> {
+    let repo = TestRepo::new("submit-undescribed")?;
+    repo.init_main()?;
+    // A proper described change at the bottom of the stack...
+    let described = repo.create_change("described", "described title", "body")?;
+    let described_branch = branch_for("described-title", &described.change_id);
+    // ...with a non-empty but UNdescribed change stacked on top of it.
+    repo.jj(&["new"])?;
+    repo.write_file("undescribed.txt", "no description here\n")?;
+
+    let output = repo.run(&["submit", "--revset", REVSET])?;
+    assert!(
+        !output.status.success(),
+        "submit must refuse a stack containing an undescribed commit"
+    );
+    assert!(
+        stderr_of(&output).contains("no description"),
+        "stderr should explain the missing description, got:\n{}",
+        stderr_of(&output)
+    );
+    // It failed during pre-flight validation, before push-refs: the described
+    // branch must NOT have been pushed, and no PR was opened.
+    assert!(
+        !repo.remote_branch_exists(&described_branch)?,
+        "no branch should reach the remote when validation fails pre-flight"
+    );
+    assert!(
+        !repo.gh_request_matches(&["api", "-X", "POST", "repos/owner/repo/pulls"])?,
+        "no PR should be created when validation fails pre-flight"
+    );
+    Ok(())
+}
+
+#[test]
 fn merge_dry_run_checks_without_mutating() -> anyhow::Result<()> {
     let repo = TestRepo::new("merge-dry-run")?;
     repo.init_main()?;
