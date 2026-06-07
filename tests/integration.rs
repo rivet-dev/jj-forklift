@@ -370,6 +370,36 @@ fn clean_two_pr_merge_fast_forwards_trunk_and_merges_by_reachability() -> anyhow
 }
 
 #[test]
+fn merge_auto_tracks_untracked_trunk_before_fast_forward() -> anyhow::Result<()> {
+    let repo = TestRepo::new("merge-untracked-trunk")?;
+    repo.init_main()?;
+    let stack = repo.create_linear_stack(1)?;
+    let branch = branch_for("change-1-title", &stack[0].change_id);
+    repo.seed_pr_number(&branch, 21)?;
+    assert_success("submit", &repo.run(&["submit", "--revset", REVSET])?);
+    let top_commit = repo.change_at(&stack[0].change_id)?.commit_id;
+
+    // Reproduce the user's broken state: a non-tracking `main@origin`. Without
+    // the auto-track fix the fast-forward push aborts with "Non-tracking remote
+    // bookmark main@origin exists".
+    repo.jj(&["bookmark", "untrack", "main@origin"])?;
+
+    let output = repo.run(&["merge", "--revset", REVSET])?;
+    assert_success("merge", &output);
+
+    // It warned that it repaired the tracking...
+    assert!(
+        stderr_of(&output).contains("was untracked"),
+        "expected an auto-track warning, stderr:\n{}",
+        stderr_of(&output)
+    );
+    // ...and the fast-forward push landed on the real remote.
+    assert_eq!(repo.git_remote_branch_target("main")?, top_commit);
+    assert_eq!(repo.stored_pr(21)?["state"], json!("MERGED"));
+    Ok(())
+}
+
+#[test]
 fn sync_rebases_then_submits() -> anyhow::Result<()> {
     let repo = TestRepo::new("sync-rebase-submit")?;
     repo.init_main()?;

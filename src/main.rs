@@ -3654,6 +3654,13 @@ fn fast_forward_trunk_over_stack(
         );
     }
 
+    // jj's default `git.auto-local-bookmark = false` leaves a fetched remote
+    // trunk bookmark untracked, and `jj bookmark set <trunk>` below then creates
+    // a *separate* non-tracking local bookmark. The subsequent push would fail
+    // with "Non-tracking remote bookmark <trunk>@<remote> exists". Repair it
+    // here (with a warning) instead of bailing.
+    ensure_trunk_tracked(runner, config, diagnostics)?;
+
     let set_args = ["bookmark", "set", config.trunk.as_str(), "-r", top_commit];
     diagnostics.command("jj", &set_args);
     let set = runner.run("jj", &set_args)?;
@@ -3683,6 +3690,34 @@ fn fast_forward_trunk_over_stack(
         );
     }
     Ok(())
+}
+
+/// Ensure the local trunk bookmark is tracking `<trunk>@<remote>` before we push
+/// it. With jj's default `git.auto-local-bookmark = false`, a fetched remote
+/// trunk bookmark is left untracked and forklift's own `jj bookmark set <trunk>`
+/// creates a non-tracking local bookmark, so the fast-forward push would abort
+/// with "Non-tracking remote bookmark <trunk>@<remote> exists". Rather than fail
+/// the merge over a recoverable local-state quirk, auto-track it and warn.
+#[tracing::instrument(skip_all)]
+fn ensure_trunk_tracked(
+    runner: &impl CommandRunner,
+    config: &AppConfig,
+    diagnostics: Diagnostics,
+) -> Result<()> {
+    let status = remote_bookmark_status(runner, config, &config.trunk)?;
+    if status.tracked {
+        return Ok(());
+    }
+    ui_warn!(
+        "trunk `{}@{}` was untracked; auto-tracking it so the merge can fast-forward push (jj's default git.auto-local-bookmark=false leaves it untracked)",
+        config.trunk,
+        config.remote
+    );
+    diagnostics.warn(format!(
+        "trunk `{}@{}` was untracked before merge push; auto-tracking",
+        config.trunk, config.remote
+    ));
+    track_remote_bookmark(runner, config, &config.trunk, diagnostics)
 }
 
 /// Poll GitHub until every PR is marked merged. GitHub applies the
