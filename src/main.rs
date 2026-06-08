@@ -4886,6 +4886,24 @@ fn move_trunk_to_remote(
         );
     }
 
+    // jj normally auto-exports bookmark mutations to git refs in colocated
+    // repos, but the auto-export does not reliably fire after a bookmark
+    // mutation initiated from a secondary workspace, leaving git's local
+    // `refs/heads/<trunk>` stale. Downstream consumers like the submit-base
+    // validator then run `git merge-base ... <trunk>` against an out-of-date
+    // tip and refuse to proceed. Forcing an explicit export here keeps the
+    // post-move colocated state coherent.
+    let export_args = ["git", "export"];
+    diagnostics.command("jj", &export_args);
+    let export = runner.run("jj", &export_args)?;
+    if !export.success {
+        bail!(
+            "failed-command=`{}` error={}",
+            display_command("jj", &export_args),
+            export.stderr.trim()
+        );
+    }
+
     Ok(())
 }
 
