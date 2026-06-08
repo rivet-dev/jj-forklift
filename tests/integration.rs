@@ -510,12 +510,89 @@ fn get_fetches_stack_from_comment_and_writes_cache() -> anyhow::Result<()> {
     Ok(())
 }
 
-// NOTE: the original suite had `non_default_workspace_writes_cache_to_backing_repo`,
-// which ran a full `submit` from a jj *secondary* workspace and asserted the
-// cache landed in the backing repo's `.jj/repo/stack`. That only worked because
-// `git` was faked: a real jj secondary workspace is NOT colocated, so the real
-// `git` commands `forklift` relies on (e.g. resolving a commit's tree) cannot
-// run there. The behavior it actually exercised — `resolve_jj_repo_dir`
-// following the `.jj/repo` pointer file to the backing repo — is covered as a
-// pure unit test (see the lib-extraction phase). Mocking `git`/`jj` to resurrect
-// the old form here is exactly what this migration removes.
+// Secondary jj workspaces are NOT git worktrees — they have a `.jj/repo`
+// pointer to the primary's `.jj/repo` but no `.git`. `forklift` must therefore
+// route every `git` invocation to the backing colocated workspace, regardless
+// of which jj workspace the user ran it from. These tests pin that down with
+// real `jj` and real `git` (no mocks).
+
+#[test]
+fn sync_from_secondary_workspace_succeeds() -> anyhow::Result<()> {
+    let repo = TestRepo::new("ws-sync")?;
+    repo.init_main()?;
+
+    let secondary = repo.root.join("secondary");
+    repo.jj(&["workspace", "add", secondary.to_str().unwrap()])?;
+    // The secondary has no `.git`; before the workspace-routing fix this
+    // failed with "resolve commit id for `main`" because git ran in the
+    // workspace cwd and found no repo.
+    let output = repo.run_in(&secondary, &["sync"])?;
+    assert_success("sync from secondary workspace", &output);
+    Ok(())
+}
+
+#[test]
+fn status_from_secondary_workspace_succeeds() -> anyhow::Result<()> {
+    let repo = TestRepo::new("ws-status")?;
+    repo.init_main()?;
+    let change = repo.create_change("change", "change title", "change body")?;
+
+    let secondary = repo.root.join("secondary");
+    repo.jj(&["workspace", "add", secondary.to_str().unwrap()])?;
+    // Reclaim the stack tip in the secondary so `trunk()..@` is non-empty.
+    repo.jj(&["new", "main"])?;
+    let edit_output = std::process::Command::new("jj")
+        .args(["edit", &change.change_id])
+        .current_dir(&secondary)
+        .output()?;
+    assert_success("jj edit on secondary", &edit_output);
+
+    // `status` calls `gh repo view` to identify the GitHub repository.
+    // Without the workspace-routing fix, `gh` ran with the secondary's cwd
+    // (no `.git`, no remote) and bailed with
+    // "resolve GitHub repository with gh".
+    let output = repo.run_in(&secondary, &["status"])?;
+    assert_success("status from secondary workspace", &output);
+    Ok(())
+}
+
+#[test]
+fn submit_from_secondary_workspace_pushes_branch_and_writes_cache_to_backing_repo()
+-> anyhow::Result<()> {
+    let repo = TestRepo::new("ws-submit")?;
+    repo.init_main()?;
+    let change = repo.create_change("change", "change title", "change body")?;
+    let branch = branch_for("change-title", &change.change_id);
+    repo.seed_pr_number(&branch, 11)?;
+
+    // Add a secondary workspace and point its @ at the stack's only change so
+    // `main..@ & ~empty()` on the secondary resolves to that change.
+    let secondary = repo.root.join("secondary");
+    repo.jj(&["workspace", "add", secondary.to_str().unwrap()])?;
+    // Primary released the change when we added the secondary; reclaim it
+    // there so the secondary can `jj edit` onto it.
+    repo.jj(&["new", "main"])?;
+    let edit_output = std::process::Command::new("jj")
+        .args(["edit", &change.change_id])
+        .current_dir(&secondary)
+        .output()?;
+    assert_success("jj edit on secondary", &edit_output);
+
+    let output = repo.run_in(&secondary, &["submit", "--revset", REVSET])?;
+    assert_success("submit from secondary workspace", &output);
+
+    // Real `jj git push` ran via the backing repo; the branch reached the
+    // shared remote.
+    assert_eq!(repo.git_remote_branch_target(&branch)?, change.commit_id);
+    // Cache is stored at `<backing>/.jj/repo/stack/...`, never inside the
+    // secondary workspace's `.jj` directory.
+    assert!(
+        repo.cache_path().exists(),
+        "submit from secondary workspace should write cache to backing repo"
+    );
+    assert!(
+        !secondary.join(".jj/repo/stack").exists(),
+        "secondary workspace must not get its own stack cache directory"
+    );
+    Ok(())
+}

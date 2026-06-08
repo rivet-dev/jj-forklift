@@ -501,9 +501,8 @@ struct GitHubContext {
 impl GitHubContext {
     #[tracing::instrument(skip_all)]
     fn resolve(runner: &impl CommandRunner) -> Result<Self> {
-        let repo = run_required(
+        let repo = gh_run_required(
             runner,
-            "gh",
             &[
                 "repo",
                 "view",
@@ -514,7 +513,7 @@ impl GitHubContext {
             ],
         )
         .context("resolve GitHub repository with gh")?;
-        let username = run_required(runner, "gh", &["api", "user", "--jq", ".login"])
+        let username = gh_run_required(runner, &["api", "user", "--jq", ".login"])
             .context("resolve GitHub username with gh")?;
 
         Ok(Self { repo, username })
@@ -530,6 +529,14 @@ struct CommandOutput {
 
 trait CommandRunner {
     fn run(&self, program: &str, args: &[&str]) -> Result<CommandOutput>;
+
+    /// Like `run`, but executes with `cwd` as the child process's working
+    /// directory. Default impl ignores `cwd` and delegates to `run`, which is
+    /// fine for test fakes that don't care about which directory they're
+    /// invoked from.
+    fn run_in_dir(&self, program: &str, args: &[&str], _cwd: &Path) -> Result<CommandOutput> {
+        self.run(program, args)
+    }
 }
 
 struct SystemRunner;
@@ -539,6 +546,21 @@ impl CommandRunner for SystemRunner {
     fn run(&self, program: &str, args: &[&str]) -> Result<CommandOutput> {
         let output = Command::new(program)
             .args(args)
+            .output()
+            .with_context(|| format!("run `{}`", display_command(program, args)))?;
+
+        Ok(CommandOutput {
+            success: output.status.success(),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        })
+    }
+
+    #[tracing::instrument(skip_all)]
+    fn run_in_dir(&self, program: &str, args: &[&str], cwd: &Path) -> Result<CommandOutput> {
+        let output = Command::new(program)
+            .args(args)
+            .current_dir(cwd)
             .output()
             .with_context(|| format!("run `{}`", display_command(program, args)))?;
 
@@ -911,7 +933,10 @@ fn config_value(runner: &impl CommandRunner, program: &str, name: &str) -> Optio
         _ => return None,
     };
 
-    let output = runner.run(program, &args).ok()?;
+    let output = match program {
+        "git" => git_run(runner, &args).ok()?,
+        _ => runner.run(program, &args).ok()?,
+    };
     if !output.success {
         return None;
     }
@@ -1104,6 +1129,78 @@ fn run_required(runner: &impl CommandRunner, program: &str, args: &[&str]) -> Re
         bail!("`{}` returned empty output", display_command(program, args));
     }
 
+    Ok(value.to_owned())
+}
+
+/// Directory of the colocated git repo backing the current jj workspace.
+///
+/// When invoked from a secondary jj workspace the cwd has no `.git` — only the
+/// primary (colocated) workspace does. The resolved `.jj/repo` path is
+/// `<primary>/.jj/repo`, so the primary workspace dir is two `parent()` calls
+/// up from there.
+#[tracing::instrument(level = "trace", skip_all)]
+fn git_workspace_root(runner: &impl CommandRunner) -> Result<PathBuf> {
+    let repo_dir = resolve_current_jj_repo_dir(runner)?;
+    repo_dir
+        .parent()
+        .and_then(Path::parent)
+        .map(PathBuf::from)
+        .with_context(|| {
+            format!(
+                "derive backing workspace dir from jj repo dir {}",
+                repo_dir.display()
+            )
+        })
+}
+
+/// Run `git` against the backing colocated workspace, regardless of which jj
+/// workspace the user invoked us from. Secondary jj workspaces are not git
+/// worktrees, so there is exactly one `.git` to talk to — the primary's.
+fn git_run(runner: &impl CommandRunner, args: &[&str]) -> Result<CommandOutput> {
+    let root = git_workspace_root(runner)?;
+    runner.run_in_dir("git", args, &root)
+}
+
+/// `run_required` for git, targeting the backing colocated workspace.
+fn git_run_required(runner: &impl CommandRunner, args: &[&str]) -> Result<String> {
+    let output = git_run(runner, args)?;
+    if !output.success {
+        bail!(
+            "`{}` failed: {}",
+            display_command("git", args),
+            output.stderr.trim()
+        );
+    }
+    let value = output.stdout.trim();
+    if value.is_empty() {
+        bail!("`{}` returned empty output", display_command("git", args));
+    }
+    Ok(value.to_owned())
+}
+
+/// Run `gh` against the backing colocated workspace. `gh repo view` and other
+/// commands without an explicit `--repo` auto-detect the repo from the git
+/// remote in the cwd; in a secondary jj workspace there is no `.git`, so we
+/// must point gh at the primary.
+fn gh_run(runner: &impl CommandRunner, args: &[&str]) -> Result<CommandOutput> {
+    let root = git_workspace_root(runner)?;
+    runner.run_in_dir("gh", args, &root)
+}
+
+/// `run_required` for gh, targeting the backing colocated workspace.
+fn gh_run_required(runner: &impl CommandRunner, args: &[&str]) -> Result<String> {
+    let output = gh_run(runner, args)?;
+    if !output.success {
+        bail!(
+            "`{}` failed: {}",
+            display_command("gh", args),
+            output.stderr.trim()
+        );
+    }
+    let value = output.stdout.trim();
+    if value.is_empty() {
+        bail!("`{}` returned empty output", display_command("gh", args));
+    }
     Ok(value.to_owned())
 }
 
@@ -2136,7 +2233,7 @@ fn validate_unfreeze_pr(config: &AppConfig, github: &GitHubContext, pr: &GhPr) -
 fn verify_repo_push_permission(runner: &impl CommandRunner, github: &GitHubContext) -> Result<()> {
     let endpoint = format!("repos/{}", github.repo);
     let args = ["api", endpoint.as_str(), "--jq", ".permissions.push"];
-    let output = runner.run("gh", &args)?;
+    let output = gh_run(runner, &args)?;
     if !output.success {
         bail!(
             "`{}` failed while checking push permission: {}",
@@ -2540,7 +2637,7 @@ fn git_commit_is_ancestor(
     descendant: &str,
 ) -> Result<bool> {
     let args = ["merge-base", "--is-ancestor", ancestor, descendant];
-    let output = runner.run("git", &args)?;
+    let output = git_run(runner, &args)?;
     Ok(output.success)
 }
 
@@ -2749,7 +2846,7 @@ fn list_open_prs(
         "--limit",
         "200",
     ];
-    let output = runner.run("gh", &args)?;
+    let output = gh_run(runner, &args)?;
     if !output.success {
         bail!(
             "`{}` failed while listing open PRs for {}: {}",
@@ -3523,7 +3620,7 @@ fn repoint_pr_base(
         return Ok(());
     }
     diagnostics.command("gh", &args);
-    let output = runner.run("gh", &args)?;
+    let output = gh_run(runner, &args)?;
     if !output.success {
         bail!(
             "failed-command=`{}` error={}",
@@ -3544,8 +3641,8 @@ fn fast_forward_trunk_over_stack(
 ) -> Result<()> {
     let remote_git_ref = remote_git_ref(config);
     let remote = git_rev_parse(runner, &remote_git_ref)?;
-    let is_ancestor = runner.run(
-        "git",
+    let is_ancestor = git_run(
+        runner,
         &["merge-base", "--is-ancestor", remote.as_str(), top_commit],
     )?;
     if !is_ancestor.success {
@@ -3672,7 +3769,7 @@ fn pr_is_merged(
         "--jq",
         ".state",
     ];
-    let output = runner.run("gh", &args)?;
+    let output = gh_run(runner, &args)?;
     if !output.success {
         bail!(
             "failed-command=`{}` error={}",
@@ -3723,7 +3820,7 @@ fn open_pr_bases_on_branch(
         "--json",
         "number",
     ];
-    let output = runner.run("gh", &args)?;
+    let output = gh_run(runner, &args)?;
     if !output.success {
         bail!(
             "failed-command=`{}` error={}",
@@ -4115,7 +4212,7 @@ fn fetch_pr_for_merge(
         "--json",
         MERGE_PR_JSON_FIELDS,
     ];
-    let output = runner.run("gh", &args)?;
+    let output = gh_run(runner, &args)?;
     if !output.success {
         bail!(
             "failed-api=`{}` error={} change:{}",
@@ -4797,7 +4894,7 @@ fn ensure_trunk_can_fast_forward(
 ) -> Result<()> {
     let remote_ref = remote_git_ref(config);
     let args = ["merge-base", "--is-ancestor", local, remote];
-    let output = runner.run("git", &args)?;
+    let output = git_run(runner, &args)?;
     if !output.success {
         bail!(
             "trunk `{}` cannot fast-forward to `{}`: local commit {}, remote commit {}",
@@ -4902,7 +4999,7 @@ fn stack_root(stack: &[ResolvedChange]) -> Result<&ResolvedChange> {
 
 #[tracing::instrument(level = "trace", skip_all, fields(rev = %rev))]
 fn git_rev_parse(runner: &impl CommandRunner, rev: &str) -> Result<String> {
-    run_required(runner, "git", &["rev-parse", rev])
+    git_run_required(runner, &["rev-parse", rev])
         .with_context(|| format!("resolve commit id for `{rev}`"))
 }
 
@@ -6085,7 +6182,7 @@ fn validate_submit_descriptions(stack: &[ResolvedChange]) -> Result<()> {
 
 #[tracing::instrument(level = "trace", skip_all, fields(left = %left, right = %right))]
 fn merge_base(runner: &impl CommandRunner, left: &str, right: &str) -> Result<String> {
-    run_required(runner, "git", &["merge-base", left, right])
+    git_run_required(runner, &["merge-base", left, right])
         .with_context(|| format!("validate merge base between {left} and {right}"))
 }
 
@@ -6096,7 +6193,7 @@ fn remote_head_oid(
     branch: &str,
 ) -> Result<Option<String>> {
     let args = ["ls-remote", "--heads", remote, branch];
-    let output = runner.run("git", &args)?;
+    let output = git_run(runner, &args)?;
     if !output.success {
         bail!(
             "`{}` failed while resolving remote head `{}`: {}",
@@ -6286,7 +6383,7 @@ fn run_pr_api(
     diagnostics: Diagnostics,
 ) -> Result<GhPr> {
     diagnostics.command("gh", args);
-    let output = runner.run("gh", args)?;
+    let output = gh_run(runner, args)?;
     if !output.success {
         bail!(
             "phase=github-pr-{action} object=change:{change_id} failed-api=`{}` error={} safe-next-command=`forklift submit --dry-run`",
@@ -6392,7 +6489,7 @@ fn list_stack_comments(
         "--jq",
         STACK_COMMENT_JQ,
     ];
-    let output = runner.run("gh", &args)?;
+    let output = gh_run(runner, &args)?;
     if !output.success {
         bail!(
             "phase=stack-comments object=PR #{} change:{} failed-api=`{}` error={} safe-next-command=`forklift submit --dry-run`",
@@ -6515,7 +6612,7 @@ fn run_comment_mutation(
     diagnostics: Diagnostics,
 ) -> Result<String> {
     diagnostics.command("gh", args);
-    let output = runner.run("gh", args)?;
+    let output = gh_run(runner, args)?;
     if !output.success {
         bail!(
             "phase=stack-comments object=PR #{} change:{} failed-api=`{}` error={} safe-next-command=`forklift submit --dry-run`",
@@ -6685,7 +6782,7 @@ fn fetch_pr_by_number(
     let pr_number_string = pr_number.to_string();
     let endpoint = format!("repos/{}/pulls/{}", github.repo, pr_number);
     let args = ["api", endpoint.as_str(), "--jq", PR_API_JQ];
-    let output = runner.run("gh", &args)?;
+    let output = gh_run(runner, &args)?;
     if !output.success {
         bail!(
             "missing cached PR for {}/{}: cache points to PR #{} but gh could not load it: {}; refusing to create a duplicate PR",
@@ -6719,7 +6816,7 @@ fn lookup_open_pr_by_head_branch(
         "--json",
         PR_JSON_FIELDS,
     ];
-    let output = runner.run("gh", &args)?;
+    let output = gh_run(runner, &args)?;
     if !output.success {
         bail!(
             "`{}` failed while looking up open PR for {}/{}: {}",
@@ -6950,7 +7047,7 @@ fn description_body(description: &str, title: &str) -> String {
 
 #[tracing::instrument(level = "trace", skip_all, fields(commit = %commit_id))]
 fn resolve_tree_id(runner: &impl CommandRunner, commit_id: &str) -> Result<String> {
-    run_required(runner, "git", &["show", "-s", "--format=%T", commit_id])
+    git_run_required(runner, &["show", "-s", "--format=%T", commit_id])
         .with_context(|| format!("resolve tree id for commit {commit_id}"))
 }
 
