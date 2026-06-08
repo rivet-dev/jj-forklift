@@ -493,6 +493,116 @@ fn merge_refuses_open_frozen_dependency_below_owned_pr() -> anyhow::Result<()> {
 }
 
 #[test]
+fn targeted_merge_errors_when_target_is_frozen() -> anyhow::Result<()> {
+    let repo = TestRepo::new("merge-target-frozen")?;
+    repo.init_main()?;
+    let main = repo.bookmark_target("main")?;
+    let imported = repo.create_change("imported", "imported title", "imported body")?;
+    let branch = branch_for("imported-title", &imported.change_id);
+    repo.set_bookmark(&branch, &imported.commit_id)?;
+    repo.push_bookmark(&branch)?;
+    repo.seed_pr(1, &branch, "main", "imported title", "imported body")?;
+    repo.set_bookmark("jj-stack/frozen/pr-1", &imported.commit_id)?;
+    repo.jj(&["new", &imported.commit_id])?;
+
+    let output = repo.run(&["merge", "1"])?;
+    assert!(
+        !output.status.success(),
+        "targeted merge of frozen PR should fail"
+    );
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("error: cannot merge PR #1 because it is frozen in this checkout"),
+        "stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("covered by frozen bookmark `jj-stack/frozen/pr-1`")
+            && stderr.contains("target range is empty"),
+        "stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("resolution:\n  unfreeze or get ownership of PR #1 before merging it"),
+        "stderr:\n{stderr}"
+    );
+    assert_eq!(
+        repo.git_remote_branch_target("main")?,
+        main,
+        "merge must not advance trunk"
+    );
+    assert_eq!(repo.stored_pr(1)?["state"], json!("OPEN"));
+    Ok(())
+}
+
+#[test]
+fn targeted_merge_errors_when_target_is_already_in_trunk() -> anyhow::Result<()> {
+    let repo = TestRepo::new("merge-target-in-trunk")?;
+    repo.init_main()?;
+    let change = repo.create_change("change", "change title", "change body")?;
+    let branch = branch_for("change-title", &change.change_id);
+    repo.set_bookmark(&branch, &change.commit_id)?;
+    repo.push_bookmark(&branch)?;
+    repo.seed_pr(1, &branch, "main", "change title", "change body")?;
+    repo.jj(&["bookmark", "set", "main", "-r", &change.commit_id])?;
+    repo.push_bookmark("main")?;
+
+    let output = repo.run(&["merge", "1"])?;
+    assert!(
+        !output.status.success(),
+        "targeted merge of trunk-reachable PR should fail"
+    );
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr
+            .contains("error: cannot merge PR #1 because it is already reachable from trunk main"),
+        "stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("which is already in `main`"),
+        "stderr:\n{stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn targeted_merge_errors_when_target_is_outside_revset() -> anyhow::Result<()> {
+    let repo = TestRepo::new("merge-target-outside-revset")?;
+    repo.init_main()?;
+    let main = repo.bookmark_target("main")?;
+    let stack = repo.create_linear_stack(2)?;
+    let bottom = branch_for("change-1-title", &stack[0].change_id);
+    let top = branch_for("change-2-title", &stack[1].change_id);
+    repo.set_bookmark(&bottom, &stack[0].commit_id)?;
+    repo.set_bookmark(&top, &stack[1].commit_id)?;
+    repo.push_bookmark(&bottom)?;
+    repo.push_bookmark(&top)?;
+    repo.seed_pr(11, &bottom, "main", "change 1 title", "change 1 body")?;
+    repo.seed_pr(12, &top, &bottom, "change 2 title", "change 2 body")?;
+
+    let output = repo.run(&["merge", "--revset", "@", "11"])?;
+    assert!(
+        !output.status.success(),
+        "targeted merge outside custom revset should fail"
+    );
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("error: PR #11 is outside the selected merge revset"),
+        "stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("but it is not in --revset `@`"),
+        "stderr:\n{stderr}"
+    );
+    assert_eq!(
+        repo.git_remote_branch_target("main")?,
+        main,
+        "merge must not advance trunk"
+    );
+    assert_eq!(repo.stored_pr(11)?["state"], json!("OPEN"));
+    assert_eq!(repo.stored_pr(12)?["state"], json!("OPEN"));
+    Ok(())
+}
+
+#[test]
 fn merge_rewritten_local_change_points_to_submit() -> anyhow::Result<()> {
     let repo = TestRepo::new("merge-rewritten-local")?;
     repo.init_main()?;

@@ -755,10 +755,17 @@ fn run_command(cli: Cli, runner: &impl CommandRunner, cwd: &str) -> Result<()> {
                 merge_config.require_approval = false;
             }
             let target_label = options.target.as_deref().unwrap_or(&options.stack.revset);
-            let revset =
+            let merge_revset =
                 effective_merge_revset(runner, &options.stack.revset, options.target.as_deref())
                     .map_err(|error| phase_error("resolve-merge-target", target_label, error))?;
-            let summary = merge_stack(runner, &merge_config, &revset, options.admin, diagnostics)?;
+            let summary = merge_stack(
+                runner,
+                &merge_config,
+                &merge_revset.revset,
+                merge_revset.target.as_ref(),
+                options.admin,
+                diagnostics,
+            )?;
             // A targeted merge only re-submits the merged range, so PRs *above*
             // the target still list the now-merged PRs in their stack comments
             // (and their branches were rebased when the merged changes were
@@ -1603,12 +1610,19 @@ fn effective_merge_revset(
     runner: &impl CommandRunner,
     base_revset: &str,
     target: Option<&str>,
-) -> Result<String> {
+) -> Result<MergeRevset> {
     let Some(target) = target else {
-        return Ok(base_revset.to_owned());
+        return Ok(MergeRevset {
+            revset: base_revset.to_owned(),
+            target: None,
+        });
     };
-    let target_commit = resolve_merge_target_commit(runner, target)?;
-    Ok(merge_revset_for_target(base_revset, &target_commit))
+    let mut target = resolve_merge_target(runner, target)?;
+    target.base_revset = base_revset.to_owned();
+    Ok(MergeRevset {
+        revset: merge_revset_for_target(base_revset, &target.commit_id),
+        target: Some(target),
+    })
 }
 
 #[tracing::instrument(skip_all)]
@@ -1622,8 +1636,30 @@ fn merge_revset_for_target(base_revset: &str, target_commit: &str) -> String {
     format!("({base_revset}) & ::{target_commit}")
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MergeRevset {
+    revset: String,
+    target: Option<MergeTarget>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MergeTarget {
+    input: String,
+    commit_id: String,
+    pr_number: Option<u64>,
+    base_revset: String,
+}
+
+impl MergeTarget {
+    fn label(&self) -> String {
+        self.pr_number
+            .map(|number| format!("PR #{number}"))
+            .unwrap_or_else(|| format!("merge target `{}`", self.input))
+    }
+}
+
 #[tracing::instrument(skip_all)]
-fn resolve_merge_target_commit(runner: &impl CommandRunner, target: &str) -> Result<String> {
+fn resolve_merge_target(runner: &impl CommandRunner, target: &str) -> Result<MergeTarget> {
     let mut github = GitHubContext::resolve(runner)
         .context("resolve GitHub repository before resolving merge target")?;
     let parsed = parse_get_target(target, &github.repo)?;
@@ -1632,16 +1668,34 @@ fn resolve_merge_target_commit(runner: &impl CommandRunner, target: &str) -> Res
     match &parsed {
         GetTarget::PullRequest { .. } => {
             let pr = resolve_target_pr(runner, &github, parsed, "merge")?;
-            Ok(pr.head_ref_oid)
+            Ok(MergeTarget {
+                input: target.to_owned(),
+                commit_id: pr.head_ref_oid,
+                pr_number: Some(pr.number),
+                base_revset: String::new(),
+            })
         }
         GetTarget::BranchOrChange { .. } => {
             match resolve_target_pr(runner, &github, parsed, "merge") {
-                Ok(pr) => Ok(pr.head_ref_oid),
-                Err(pr_error) => resolve_single_rev(runner, target).with_context(|| {
-                    format!(
-                        "merge target `{target}` did not resolve as an open PR target; PR lookup failed with: {pr_error:#}"
-                    )
+                Ok(pr) => Ok(MergeTarget {
+                    input: target.to_owned(),
+                    commit_id: pr.head_ref_oid,
+                    pr_number: Some(pr.number),
+                    base_revset: String::new(),
                 }),
+                Err(pr_error) => {
+                    let commit_id = resolve_single_rev(runner, target).with_context(|| {
+                        format!(
+                            "merge target `{target}` did not resolve as an open PR target; PR lookup failed with: {pr_error:#}"
+                        )
+                    })?;
+                    Ok(MergeTarget {
+                        input: target.to_owned(),
+                        commit_id,
+                        pr_number: None,
+                        base_revset: String::new(),
+                    })
+                }
             }
         }
     }
@@ -4183,11 +4237,105 @@ fn print_status_report(report: &StatusReport) {
 ///
 /// `admin` bypasses branch-protection (`BLOCKED`), required-status-check, and
 /// approval gates for operators force-pushing past protection.
+fn diagnose_empty_targeted_merge(
+    runner: &impl CommandRunner,
+    config: &AppConfig,
+    target: &MergeTarget,
+    narrowed_revset: &str,
+    frozen_bookmarks: &[FrozenBookmark],
+) -> Result<()> {
+    let target_label = target.label();
+    let trunk = resolve_single_rev(runner, "trunk()")?;
+    if git_commit_is_ancestor(runner, &target.commit_id, &trunk)? {
+        return Err(CliError::new(format!(
+            "cannot merge {target_label} because it is already reachable from trunk {}",
+            config.trunk
+        ))
+        .reason(format!(
+            "{target_label} resolves to {}, which is already in `{}`.",
+            target.commit_id, config.trunk
+        ))
+        .resolution("choose an unmerged owned PR, or run `forklift sync` to clean up local state")
+        .into());
+    }
+
+    let target_range_revset = format!("trunk()..{} & ~empty()", target.commit_id);
+    let target_range = resolve_stack(runner, &target_range_revset)?;
+    let immutable_target_revset = format!("{} & ::(immutable_heads() | root())", target.commit_id);
+    let immutable_target = resolve_stack(runner, &immutable_target_revset)?;
+    if !immutable_target.is_empty() {
+        if let Some(bookmark) =
+            frozen_bookmark_covering_target(runner, &target.commit_id, frozen_bookmarks)?
+        {
+            return Err(CliError::new(format!(
+                "cannot merge {target_label} because it is frozen in this checkout"
+            ))
+            .reason(format!(
+                "{target_label} resolves to {}, but that commit is covered by frozen bookmark `{}`. Frozen revisions are treated as dependencies, so forklift merge only considers owned mutable changes and the target range is empty.",
+                target.commit_id, bookmark.name
+            ))
+            .resolution(format!(
+                "unfreeze or get ownership of {target_label} before merging it"
+            ))
+            .into());
+        }
+
+        return Err(CliError::new(format!(
+            "cannot merge {target_label} because it is immutable in this checkout"
+        ))
+        .reason(format!(
+            "{target_label} resolves to {}, but that commit is excluded by `immutable_heads()`.",
+            target.commit_id
+        ))
+        .resolution("choose an owned mutable stack change before merging it")
+        .into());
+    }
+
+    if !target_range.is_empty() {
+        return Err(CliError::new(format!(
+            "{target_label} is outside the selected merge revset"
+        ))
+        .reason(format!(
+            "{target_label} resolves to {}, but it is not in --revset `{}`.",
+            target.commit_id, target.base_revset
+        ))
+        .resolution(format!(
+            "rerun with a revset that includes {target_label}, or run `forklift merge {}` from that stack",
+            target.input
+        ))
+        .into());
+    }
+
+    Err(CliError::new(format!(
+        "cannot merge {target_label} because the target range is empty"
+    ))
+    .reason(format!(
+        "{target_label} resolves to {}, but `{narrowed_revset}` produced no owned non-empty changes.",
+        target.commit_id
+    ))
+    .resolution("choose an owned mutable non-empty PR before merging it")
+    .into())
+}
+
+fn frozen_bookmark_covering_target<'a>(
+    runner: &impl CommandRunner,
+    target_commit: &str,
+    frozen_bookmarks: &'a [FrozenBookmark],
+) -> Result<Option<&'a FrozenBookmark>> {
+    for bookmark in frozen_bookmarks {
+        if git_commit_is_ancestor(runner, target_commit, &bookmark.commit_id)? {
+            return Ok(Some(bookmark));
+        }
+    }
+    Ok(None)
+}
+
 #[tracing::instrument(skip_all, fields(revset = %revset))]
 fn merge_stack(
     runner: &impl CommandRunner,
     config: &AppConfig,
     revset: &str,
+    target: Option<&MergeTarget>,
     admin: bool,
     diagnostics: Diagnostics,
 ) -> Result<MergeSummary> {
@@ -4201,6 +4349,9 @@ fn merge_stack(
     let stack = resolve_stack(runner, revset)
         .map_err(|error| phase_error("resolve-stack", revset, error))?;
     if stack.is_empty() {
+        if let Some(target) = target {
+            diagnose_empty_targeted_merge(runner, config, target, revset, &frozen_bookmarks)?;
+        }
         return Ok(summary);
     }
     validate_stack_shape(&stack, revset)
