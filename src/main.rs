@@ -1030,7 +1030,7 @@ fn run_command(cli: Cli, runner: &impl CommandRunner, cwd: &str) -> Result<()> {
             let target_label = options.target.as_deref().unwrap_or("@");
             let github = GitHubContext::resolve(runner)
                 .map_err(|error| phase_error("resolve-github", target_label, error))?;
-            let (number, url) = resolve_pr_url(runner, &github, options.target.as_deref())
+            let (number, url) = resolve_pr_url(runner, &config, &github, options.target.as_deref())
                 .map_err(|error| phase_error("resolve-pr", target_label, error))?;
             if cli.dry_run {
                 ui_progress(
@@ -4142,6 +4142,7 @@ fn resolve_get_target_pr(
 #[tracing::instrument(skip_all)]
 fn resolve_pr_url(
     runner: &impl CommandRunner,
+    config: &AppConfig,
     github: &GitHubContext,
     target: Option<&str>,
 ) -> Result<(u64, String)> {
@@ -4154,11 +4155,28 @@ fn resolve_pr_url(
             }
         },
         None => {
+            ensure_default_pr_target_is_stack_change(runner, config)?;
             let change_id = current_change_id(runner)?;
             let pr = lookup_get_target_pr(runner, github, &change_id, "pr")?;
             Ok((pr.number, github_pr_url(&github.repo, pr.number)))
         }
     }
+}
+
+#[tracing::instrument(skip_all)]
+fn ensure_default_pr_target_is_stack_change(
+    runner: &impl CommandRunner,
+    config: &AppConfig,
+) -> Result<()> {
+    let stack = resolve_stack(runner, DEFAULT_STACK_REVSET)?;
+    if !stack.is_empty() {
+        return Ok(());
+    }
+
+    Err(CliError::new("no current PR")
+        .reason(format!("current checkout is on trunk `{}`", config.trunk))
+        .resolution("check out a stack change or pass a PR target")
+        .into())
 }
 
 /// Change id of the current working-copy commit (`@`).

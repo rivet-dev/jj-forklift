@@ -149,6 +149,33 @@ fn pr_error_is_rendered_as_a_human_diagnostic() -> anyhow::Result<()> {
 }
 
 #[test]
+fn pr_on_trunk_explains_there_is_no_current_pr() -> anyhow::Result<()> {
+    let repo = TestRepo::new("pr-on-trunk")?;
+    repo.init_main()?;
+
+    let output = repo.run(&["pr"])?;
+    assert!(!output.status.success(), "pr on trunk should fail");
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("error: no current PR"),
+        "stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("reason:\n  current checkout is on trunk `main`"),
+        "stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("resolution:\n  check out a stack change or pass a PR target"),
+        "stderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("forklift submit --dry-run"),
+        "trunk diagnostic should not point to submit\nstderr:\n{stderr}"
+    );
+    Ok(())
+}
+
+#[test]
 fn two_change_submit_uses_parent_head_branch_base() -> anyhow::Result<()> {
     let repo = TestRepo::new("two-submit")?;
     repo.init_main()?;
@@ -327,7 +354,7 @@ fn submit_refuses_undescribed_commit_before_pushing() -> anyhow::Result<()> {
     repo.jj(&["new"])?;
     repo.write_file("undescribed.txt", "no description here\n")?;
 
-    let output = repo.run(&["submit", "--revset", REVSET])?;
+    let output = repo.run(&["submit", "--yes"])?;
     assert!(
         !output.status.success(),
         "submit must refuse a stack containing an undescribed commit"
@@ -459,7 +486,7 @@ fn merge_prompts_to_sync_submit_when_trunk_is_stale() -> anyhow::Result<()> {
         "stderr:\n{stderr}"
     );
     assert!(
-        stderr.contains("resolution:\n  rerun `forklift merge 9 --sync`"),
+        stderr.contains("resolution:\n  run `forklift merge 9 --sync`"),
         "stderr:\n{stderr}"
     );
     assert_eq!(repo.git_remote_branch_target("main")?, advanced.commit_id);
@@ -591,16 +618,15 @@ fn targeted_merge_errors_when_target_is_frozen() -> anyhow::Result<()> {
     );
     let stderr = stderr_of(&output);
     assert!(
-        stderr.contains("error: cannot merge PR #1 because it is frozen in this checkout"),
+        stderr.contains("error: PR #1 is frozen"),
         "stderr:\n{stderr}"
     );
     assert!(
-        stderr.contains("covered by frozen bookmark `forklift/frozen/pr-1`")
-            && stderr.contains("target range is empty"),
+        stderr.contains("covered by `forklift/frozen/pr-1`"),
         "stderr:\n{stderr}"
     );
     assert!(
-        stderr.contains("resolution:\n  unfreeze or get ownership of PR #1 before merging it"),
+        stderr.contains("resolution:\n  unfreeze or get ownership of PR #1"),
         "stderr:\n{stderr}"
     );
     assert_eq!(
@@ -631,12 +657,11 @@ fn targeted_merge_errors_when_target_is_already_in_trunk() -> anyhow::Result<()>
     );
     let stderr = stderr_of(&output);
     assert!(
-        stderr
-            .contains("error: cannot merge PR #1 because it is already reachable from trunk main"),
+        stderr.contains("error: PR #1 is already on trunk"),
         "stderr:\n{stderr}"
     );
     assert!(
-        stderr.contains("which is already in `main`"),
+        stderr.contains("reason:\n  ") && stderr.contains(" is in `main`"),
         "stderr:\n{stderr}"
     );
     Ok(())
@@ -672,7 +697,7 @@ fn merge_rewritten_local_change_points_to_submit() -> anyhow::Result<()> {
     );
     assert!(
         stderr
-            .contains("resolution:\n  rerun `forklift submit --yes`, then rerun `forklift merge`"),
+            .contains("resolution:\n  run `forklift submit --yes`, then `forklift merge`"),
         "expected submit confirmation guidance, stderr:\n{stderr}"
     );
     assert!(
