@@ -65,9 +65,12 @@ fn submit_requires_confirmation_before_mutation() -> anyhow::Result<()> {
         stderr.contains(&format!(
             "actions:\n  1. create new PR `change title`: push origin/{branch} @ {}, base main",
             &change.commit_id[..8]
-        )) && stderr.contains("2. sync stack comments for submitted stack")
-            && stderr.contains("------------------------------------------------------------"),
+        )) && stderr.contains("2. sync stack comments for submitted stack"),
         "stderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("------------------------------------------------------------"),
+        "submit confirmation should not print a divider before the prompt\nstderr:\n{stderr}"
     );
     assert!(
         stderr.contains("error: submit requires confirmation"),
@@ -428,6 +431,43 @@ fn merge_dry_run_refuses_stale_remote_trunk() -> anyhow::Result<()> {
 }
 
 #[test]
+fn merge_prompts_to_sync_submit_when_trunk_is_stale() -> anyhow::Result<()> {
+    let repo = TestRepo::new("merge-prompt-sync-submit")?;
+    repo.init_main()?;
+    let change = repo.create_change("change", "change title", "change body")?;
+    let branch = branch_for("change-title", &change.change_id);
+    repo.seed_pr_number(&branch, 9)?;
+    assert_success("submit", &repo.run(&["submit", "--yes"])?);
+    let submitted = repo.change_at(&change.change_id)?;
+    let advanced = repo.advance_remote_trunk("remote work", &change.change_id)?;
+
+    let output = repo.run(&["merge", "9", "--admin"])?;
+    assert!(
+        !output.status.success(),
+        "non-interactive merge should explain how to sync and submit before merging"
+    );
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("error: failed during merge-push"),
+        "stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(&format!(
+            "trunk `main` cannot fast-forward to {}: remote {} is not an ancestor; run `forklift merge 9 --sync` first",
+            submitted.commit_id, advanced.commit_id
+        )),
+        "stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("resolution:\n  rerun `forklift merge 9 --sync`"),
+        "stderr:\n{stderr}"
+    );
+    assert_eq!(repo.git_remote_branch_target("main")?, advanced.commit_id);
+    assert_eq!(repo.stored_pr(9)?["state"], json!("OPEN"));
+    Ok(())
+}
+
+#[test]
 fn merge_sync_rebases_submits_then_merges_target() -> anyhow::Result<()> {
     let repo = TestRepo::new("merge-sync-target")?;
     repo.init_main()?;
@@ -541,7 +581,7 @@ fn targeted_merge_errors_when_target_is_frozen() -> anyhow::Result<()> {
     repo.set_bookmark(&branch, &imported.commit_id)?;
     repo.push_bookmark(&branch)?;
     repo.seed_pr(1, &branch, "main", "imported title", "imported body")?;
-    repo.set_bookmark("jj-stack/frozen/pr-1", &imported.commit_id)?;
+    repo.set_bookmark("forklift/frozen/pr-1", &imported.commit_id)?;
     repo.jj(&["new", &imported.commit_id])?;
 
     let output = repo.run(&["merge", "1"])?;
@@ -555,7 +595,7 @@ fn targeted_merge_errors_when_target_is_frozen() -> anyhow::Result<()> {
         "stderr:\n{stderr}"
     );
     assert!(
-        stderr.contains("covered by frozen bookmark `jj-stack/frozen/pr-1`")
+        stderr.contains("covered by frozen bookmark `forklift/frozen/pr-1`")
             && stderr.contains("target range is empty"),
         "stderr:\n{stderr}"
     );
@@ -625,6 +665,19 @@ fn merge_rewritten_local_change_points_to_submit() -> anyhow::Result<()> {
     assert!(
         stderr.contains("your stack was rewritten") && stderr.contains("forklift submit"),
         "expected a submit-pointing message, stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("error: failed during merge-pr-check"),
+        "stderr:\n{stderr}"
+    );
+    assert!(
+        stderr
+            .contains("resolution:\n  rerun `forklift submit --yes`, then rerun `forklift merge`"),
+        "expected submit confirmation guidance, stderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("resolution:\n  run `forklift submit --dry-run`"),
+        "merge readiness should not fall back to the generic submit dry-run hint, stderr:\n{stderr}"
     );
     // It must NOT have merged the PR.
     assert_ne!(repo.stored_pr(31)?["state"], json!("MERGED"));
@@ -921,7 +974,7 @@ fn unfreeze_tracks_descendant_untracked_remote_blockers() -> anyhow::Result<()> 
         "change 1 title",
         "change 1 body",
     )?;
-    repo.set_bookmark("jj-stack/frozen/pr-11", &stack[0].commit_id)?;
+    repo.set_bookmark("forklift/frozen/pr-11", &stack[0].commit_id)?;
     repo.jj(&["bookmark", "untrack", &format!("{top_branch}@origin")])?;
 
     assert!(
@@ -937,7 +990,7 @@ fn unfreeze_tracks_descendant_untracked_remote_blockers() -> anyhow::Result<()> 
         stderr_of(&output)
     );
     assert!(
-        !repo.bookmark_exists("jj-stack/frozen/pr-11")?,
+        !repo.bookmark_exists("forklift/frozen/pr-11")?,
         "frozen bookmark should be removed"
     );
     assert!(
@@ -968,7 +1021,7 @@ fn unfreeze_recovers_when_previous_attempt_already_removed_frozen_bookmark() -> 
     repo.jj(&["bookmark", "untrack", &format!("{top_branch}@origin")])?;
 
     assert!(
-        !repo.bookmark_exists("jj-stack/frozen/pr-11")?,
+        !repo.bookmark_exists("forklift/frozen/pr-11")?,
         "test starts in the partial old-unfreeze state"
     );
     assert!(
@@ -979,7 +1032,7 @@ fn unfreeze_recovers_when_previous_attempt_already_removed_frozen_bookmark() -> 
     let output = repo.run(&["unfreeze", "11"])?;
     assert_success("unfreeze 11", &output);
     assert!(
-        stderr_of(&output).contains("frozen bookmark `jj-stack/frozen/pr-11` is missing"),
+        stderr_of(&output).contains("frozen bookmark `forklift/frozen/pr-11` is missing"),
         "stderr:\n{}",
         stderr_of(&output)
     );
@@ -1101,7 +1154,7 @@ fn repair_prunes_merged_pr_from_stale_stack_comment() -> anyhow::Result<()> {
     let get_after = repo.run(&["get", "1"])?;
     assert_success("get 1 after repair", &get_after);
     assert_eq!(
-        repo.bookmark_target("jj-stack/frozen/pr-1")?,
+        repo.bookmark_target("forklift/frozen/pr-1")?,
         open.commit_id
     );
     Ok(())

@@ -343,6 +343,7 @@ fn phase_label(phase: &str) -> (&'static str, &str) {
         "move-trunk" => ("Moving", "trunk"),
         "merge-push" => ("Merging", "fast-forward push"),
         "merge-refresh-above" => ("Refreshing", "stack above merge"),
+        "merge-submit" => ("Submitting", "stack"),
         "freeze-stack" => ("Freezing", "stack bookmarks"),
         "sync-frozen" => ("Syncing", "frozen bookmarks"),
         "remove-frozen" => ("Removing", "frozen bookmarks"),
@@ -385,8 +386,77 @@ const LOCAL_BOOKMARK_TEMPLATE: &str = "name ++ \"\\t\" ++ remote ++ \"\\n\"";
 const FROZEN_BOOKMARK_TEMPLATE: &str = "name ++ \"\\t\" ++ if(conflict, \"conflicted\", \"ok\") ++ \"\\t\" ++ if(conflict, \"\", normal_target.commit_id()) ++ \"\\n\"";
 const FROZEN_BOOKMARK_PREFIX: &str = "forklift/frozen/pr-";
 
+mod build_info {
+    pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+    pub const LONG_VERSION: &str = concat!(
+        env!("CARGO_PKG_VERSION"),
+        "\n",
+        "build date: ",
+        env!("VERGEN_BUILD_DATE"),
+        "\n",
+        "build timestamp: ",
+        env!("VERGEN_BUILD_TIMESTAMP"),
+        "\n",
+        "cargo target: ",
+        env!("VERGEN_CARGO_TARGET_TRIPLE"),
+        "\n",
+        "cargo features: ",
+        env!("VERGEN_CARGO_FEATURES"),
+        "\n",
+        "cargo opt level: ",
+        env!("VERGEN_CARGO_OPT_LEVEL"),
+        "\n",
+        "cargo debug: ",
+        env!("VERGEN_CARGO_DEBUG"),
+        "\n",
+        "git branch: ",
+        env!("VERGEN_GIT_BRANCH"),
+        "\n",
+        "git describe: ",
+        env!("VERGEN_GIT_DESCRIBE"),
+        "\n",
+        "git sha: ",
+        env!("VERGEN_GIT_SHA"),
+        "\n",
+        "git dirty: ",
+        env!("VERGEN_GIT_DIRTY"),
+        "\n",
+        "git commit count: ",
+        env!("VERGEN_GIT_COMMIT_COUNT"),
+        "\n",
+        "git commit date: ",
+        env!("VERGEN_GIT_COMMIT_DATE"),
+        "\n",
+        "git commit timestamp: ",
+        env!("VERGEN_GIT_COMMIT_TIMESTAMP"),
+        "\n",
+        "rustc: ",
+        env!("VERGEN_RUSTC_SEMVER"),
+        "\n",
+        "rustc channel: ",
+        env!("VERGEN_RUSTC_CHANNEL"),
+        "\n",
+        "rustc host: ",
+        env!("VERGEN_RUSTC_HOST_TRIPLE"),
+        "\n",
+        "rustc commit: ",
+        env!("VERGEN_RUSTC_COMMIT_HASH"),
+        "\n",
+        "rustc commit date: ",
+        env!("VERGEN_RUSTC_COMMIT_DATE"),
+        "\n",
+        "rustc llvm: ",
+        env!("VERGEN_RUSTC_LLVM_VERSION")
+    );
+}
+
 #[derive(Debug, Parser)]
-#[command(name = "forklift", about = "Manage a jj-native stacked PR workflow")]
+#[command(
+    name = "forklift",
+    about = "Manage a jj-native stacked PR workflow",
+    version = build_info::VERSION,
+    long_version = build_info::LONG_VERSION
+)]
 struct Cli {
     #[arg(short, long, global = true)]
     verbose: bool,
@@ -634,6 +704,26 @@ fn run(cli: Cli, runner: &impl CommandRunner) -> Result<()> {
             .path()
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| "<disabled>".to_owned()),
+        version = build_info::VERSION,
+        build_date = env!("VERGEN_BUILD_DATE"),
+        build_timestamp = env!("VERGEN_BUILD_TIMESTAMP"),
+        cargo_target = env!("VERGEN_CARGO_TARGET_TRIPLE"),
+        cargo_features = env!("VERGEN_CARGO_FEATURES"),
+        cargo_opt_level = env!("VERGEN_CARGO_OPT_LEVEL"),
+        cargo_debug = env!("VERGEN_CARGO_DEBUG"),
+        git_branch = env!("VERGEN_GIT_BRANCH"),
+        git_describe = env!("VERGEN_GIT_DESCRIBE"),
+        git_sha = env!("VERGEN_GIT_SHA"),
+        git_dirty = env!("VERGEN_GIT_DIRTY"),
+        git_commit_count = env!("VERGEN_GIT_COMMIT_COUNT"),
+        git_commit_date = env!("VERGEN_GIT_COMMIT_DATE"),
+        git_commit_timestamp = env!("VERGEN_GIT_COMMIT_TIMESTAMP"),
+        rustc = env!("VERGEN_RUSTC_SEMVER"),
+        rustc_channel = env!("VERGEN_RUSTC_CHANNEL"),
+        rustc_host = env!("VERGEN_RUSTC_HOST_TRIPLE"),
+        rustc_commit = env!("VERGEN_RUSTC_COMMIT_HASH"),
+        rustc_commit_date = env!("VERGEN_RUSTC_COMMIT_DATE"),
+        rustc_llvm = env!("VERGEN_RUSTC_LLVM_VERSION"),
         "command start"
     );
 
@@ -782,7 +872,7 @@ fn run_command(cli: Cli, runner: &impl CommandRunner, cwd: &str) -> Result<()> {
             let merge_revset = effective_merge_revset(runner, options.target.as_deref())
                 .map_err(|error| phase_error("resolve-merge-target", target_label, error))?;
             let sync_command = merge_sync_command(options.target.as_deref());
-            let summary = merge_stack(
+            let summary = match merge_stack(
                 runner,
                 &merge_config,
                 &merge_revset.revset,
@@ -790,7 +880,40 @@ fn run_command(cli: Cli, runner: &impl CommandRunner, cwd: &str) -> Result<()> {
                 &sync_command,
                 options.admin,
                 diagnostics,
-            )?;
+            ) {
+                Ok(summary) => summary,
+                Err(error) if !cli.dry_run => {
+                    if let Some(submit_required) = error.downcast_ref::<MergeSubmitRequired>() {
+                        submit_before_retrying_merge(
+                            runner,
+                            &config,
+                            &merge_revset.revset,
+                            submit_required,
+                            diagnostics,
+                        )?;
+                    } else if let Some(sync_required) = error.downcast_ref::<MergeSyncRequired>() {
+                        sync_submit_before_retrying_merge(
+                            runner,
+                            &config,
+                            options.target.as_deref(),
+                            sync_required,
+                            diagnostics,
+                        )?;
+                    } else {
+                        return Err(error);
+                    }
+                    merge_stack(
+                        runner,
+                        &merge_config,
+                        &merge_revset.revset,
+                        merge_revset.target.as_ref(),
+                        &sync_command,
+                        options.admin,
+                        diagnostics,
+                    )?
+                }
+                Err(error) => return Err(error),
+            };
             // A targeted merge only re-submits the merged range, so PRs *above*
             // the target still list the now-merged PRs in their stack comments
             // (and their branches were rebased when the merged changes were
@@ -1000,6 +1123,114 @@ impl Display for CliError {
 
 impl Error for CliError {}
 
+#[derive(Debug, Clone)]
+struct MergeSubmitRequired {
+    reason: String,
+    resolution: String,
+    phase: Option<&'static str>,
+    object: Option<String>,
+}
+
+impl MergeSubmitRequired {
+    fn new(reason: impl Into<String>, resolution: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+            resolution: resolution.into(),
+            phase: None,
+            object: None,
+        }
+    }
+
+    fn with_phase(mut self, phase: &'static str, object: impl Into<String>) -> Self {
+        self.phase = Some(phase);
+        self.object = Some(object.into());
+        self
+    }
+
+    fn cli_error(&self) -> CliError {
+        let mut error = CliError::new(
+            self.phase
+                .map(phase_summary_for_error)
+                .unwrap_or("stack must be submitted before merge"),
+        )
+        .reason(self.reason.clone())
+        .resolution(self.resolution.clone());
+        if let Some(phase) = self.phase {
+            error = error.detail("phase", phase);
+        }
+        if let Some(object) = &self.object {
+            error = error.detail("object", object);
+        }
+        error
+    }
+}
+
+impl Display for MergeSubmitRequired {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.cli_error().fmt(formatter)
+    }
+}
+
+impl Error for MergeSubmitRequired {}
+
+#[derive(Debug, Clone)]
+struct MergeSyncRequired {
+    reason: String,
+    resolution: String,
+    phase: Option<&'static str>,
+    object: Option<String>,
+}
+
+impl MergeSyncRequired {
+    fn new(reason: impl Into<String>, resolution: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+            resolution: resolution.into(),
+            phase: None,
+            object: None,
+        }
+    }
+
+    fn with_phase(mut self, phase: &'static str, object: impl Into<String>) -> Self {
+        self.phase = Some(phase);
+        self.object = Some(object.into());
+        self
+    }
+
+    fn cli_error(&self) -> CliError {
+        let mut error = CliError::new(
+            self.phase
+                .map(phase_summary_for_error)
+                .unwrap_or("stack must be synced before merge"),
+        )
+        .reason(self.reason.clone())
+        .resolution(self.resolution.clone());
+        if let Some(phase) = self.phase {
+            error = error.detail("phase", phase);
+        }
+        if let Some(object) = &self.object {
+            error = error.detail("object", object);
+        }
+        error
+    }
+}
+
+impl Display for MergeSyncRequired {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.cli_error().fmt(formatter)
+    }
+}
+
+impl Error for MergeSyncRequired {}
+
+fn phase_summary_for_error(phase: &str) -> &'static str {
+    match phase {
+        "merge-pr-check" => "failed during merge-pr-check",
+        "merge-push" => "failed during merge-push",
+        _ => "command failed",
+    }
+}
+
 fn phase_summary(phase: &str, object: &str) -> String {
     match phase {
         "resolve-config" => "could not resolve configuration".to_owned(),
@@ -1035,6 +1266,12 @@ fn render_cli_error(error: &anyhow::Error, debug_log: Option<&Path>) {
 
 fn diagnostic_from_error(error: &anyhow::Error) -> CliError {
     for cause in error.chain() {
+        if let Some(submit_required) = cause.downcast_ref::<MergeSubmitRequired>() {
+            return submit_required.cli_error();
+        }
+        if let Some(sync_required) = cause.downcast_ref::<MergeSyncRequired>() {
+            return sync_required.cli_error();
+        }
         if let Some(cli_error) = cause.downcast_ref::<CliError>() {
             return cli_error.clone();
         }
@@ -2715,7 +2952,6 @@ fn render_submit_action_plan(config: &AppConfig, plans: &[SubmitPlan], mut emit:
         ));
     }
     emit("");
-    emit("------------------------------------------------------------");
 }
 
 fn submit_action_description(config: &AppConfig, plan: &SubmitPlan) -> String {
@@ -2775,6 +3011,98 @@ fn confirm_submit_stack(yes: bool, yes_command: &str) -> Result<()> {
         .reason("user declined to apply the submit plan")
         .resolution(format!("rerun with `{yes_command}`"))
         .into())
+}
+
+fn submit_before_retrying_merge(
+    runner: &impl CommandRunner,
+    config: &AppConfig,
+    revset: &str,
+    submit_required: &MergeSubmitRequired,
+    diagnostics: Diagnostics,
+) -> Result<()> {
+    if !io::stdin().is_terminal() {
+        let diagnostic = submit_required.cli_error();
+        return Err(CliError::new(diagnostic.message)
+            .reason(diagnostic.reason.unwrap_or_else(|| {
+                "merge found local changes that have not been submitted".to_owned()
+            }))
+            .resolution("rerun `forklift submit --yes`, then rerun `forklift merge`")
+            .into());
+    }
+
+    tracing::debug!(
+        reason = %submit_required.reason,
+        resolution = %submit_required.resolution,
+        "merge requires submit before retry"
+    );
+    eprintln!("Merge needs the stack submitted before it can continue.");
+
+    diagnostics.phase("merge-submit");
+    let context = resolve_stack_context(runner, revset)
+        .map_err(|error| phase_error("resolve-stack", revset, error))?;
+    submit_stack(
+        runner,
+        config,
+        &context,
+        false,
+        "forklift submit --yes",
+        diagnostics,
+    )?;
+    Ok(())
+}
+
+fn sync_submit_before_retrying_merge(
+    runner: &impl CommandRunner,
+    config: &AppConfig,
+    target: Option<&str>,
+    sync_required: &MergeSyncRequired,
+    diagnostics: Diagnostics,
+) -> Result<()> {
+    if !io::stdin().is_terminal() {
+        let diagnostic = sync_required.cli_error();
+        return Err(CliError::new(diagnostic.message)
+            .reason(
+                diagnostic
+                    .reason
+                    .unwrap_or_else(|| "merge found a stack that is not synced".to_owned()),
+            )
+            .resolution(format!("rerun `{}`", merge_sync_command(target)))
+            .into());
+    }
+
+    tracing::debug!(
+        reason = %sync_required.reason,
+        resolution = %sync_required.resolution,
+        "merge requires sync and submit before retry"
+    );
+    let command = merge_sync_command(target);
+    eprintln!("Merge needs sync and submit before it can continue.");
+    eprint!("Run `{command}` now? [y/N] ");
+    io::stderr().flush().context("flush merge sync prompt")?;
+    let mut answer = String::new();
+    io::stdin()
+        .read_line(&mut answer)
+        .context("read merge sync prompt")?;
+    if !matches!(answer.trim(), "y" | "Y" | "yes" | "YES" | "Yes") {
+        return Err(CliError::new("merge cancelled")
+            .reason("sync and submit were not run")
+            .resolution(format!("run `{command}`"))
+            .into());
+    }
+
+    let target_label = target.unwrap_or(DEFAULT_STACK_REVSET);
+    let sync_revset = effective_sync_revset(runner, target)
+        .map_err(|error| phase_error("resolve-sync-target", target_label, error))?;
+    sync_stack(
+        runner,
+        config,
+        &sync_revset.revset,
+        sync_revset.target.as_ref(),
+        true,
+        true,
+        diagnostics,
+    )?;
+    Ok(())
 }
 
 fn print_submit_plan_line(line: &str) {
@@ -4712,6 +5040,12 @@ fn merge_stack(
             admin,
         )
         .map_err(|error| {
+            if let Some(submit_required) = error.downcast_ref::<MergeSubmitRequired>() {
+                return anyhow::Error::new(submit_required.clone().with_phase(
+                    "merge-pr-check",
+                    format!("PR #{}", candidate.entry.pr_number),
+                ));
+            }
             phase_error(
                 "merge-pr-check",
                 format!("PR #{}", candidate.entry.pr_number),
@@ -4734,7 +5068,7 @@ fn merge_stack(
 
     if diagnostics.dry_run {
         validate_trunk_fast_forward_over_stack(runner, config, &top.commit_id, sync_command)
-            .map_err(|error| phase_error("merge-push", &config.trunk, error))?;
+            .map_err(|error| merge_push_error(&config.trunk, error))?;
         diagnostics.plan_line(&format!(
             "- fast-forward trunk `{}` to {} ({})",
             config.trunk, top.change_id, top.commit_id
@@ -4761,7 +5095,7 @@ fn merge_stack(
     // individual commits (no squash).
     diagnostics.phase("merge-push");
     fast_forward_trunk_over_stack(runner, config, &top.commit_id, sync_command, diagnostics)
-        .map_err(|error| phase_error("merge-push", &config.trunk, error))?;
+        .map_err(|error| merge_push_error(&config.trunk, error))?;
     summary.submit_runs += 1;
 
     // GitHub marks each PR merged asynchronously once its head lands in trunk.
@@ -4874,6 +5208,17 @@ fn fast_forward_trunk_over_stack(
     Ok(())
 }
 
+fn merge_push_error(object: impl Display, error: anyhow::Error) -> anyhow::Error {
+    if let Some(sync_required) = error.downcast_ref::<MergeSyncRequired>() {
+        return anyhow::Error::new(
+            sync_required
+                .clone()
+                .with_phase("merge-push", object.to_string()),
+        );
+    }
+    phase_error("merge-push", object, error)
+}
+
 #[tracing::instrument(skip_all, fields(top = %top_commit))]
 fn validate_trunk_fast_forward_over_stack(
     runner: &impl CommandRunner,
@@ -4888,13 +5233,17 @@ fn validate_trunk_fast_forward_over_stack(
         &["merge-base", "--is-ancestor", remote.as_str(), top_commit],
     )?;
     if !is_ancestor.success {
-        bail!(
+        return Err(MergeSyncRequired::new(
+            format!(
             "trunk `{}` cannot fast-forward to {}: remote {} is not an ancestor; run `{}` first",
             config.trunk,
             top_commit,
             remote,
             sync_command
-        );
+            ),
+            format!("run `{sync_command}` to sync and submit the stack before merging"),
+        )
+        .into());
     }
     Ok(())
 }
@@ -5600,34 +5949,46 @@ fn validate_pr_ready_for_merge(
         if pr.head_ref_oid == entry.head_sha {
             // PR and cache agree; only the local commit moved. This is the
             // common case after `sync` rebased the stack without re-pushing.
-            bail!(
+            return Err(MergeSubmitRequired::new(
+                format!(
                 "local change {} is now {}, but PR #{} (and the cache) are still at {}; your stack was rewritten (e.g. by `forklift sync`) but not pushed — run `forklift submit` before merging",
                 change.change_id,
                 change.commit_id,
                 entry.pr_number,
                 pr.head_ref_oid
-            );
+                ),
+                "run `forklift submit`; it will show the submit plan and ask whether to apply it. Then rerun `forklift merge`.",
+            )
+            .into());
         }
         if change.commit_id == entry.head_sha {
             // Local commit and cache agree; the PR head moved on GitHub. The
             // branch advanced out-of-band, so refresh local state then re-push.
-            bail!(
+            return Err(MergeSubmitRequired::new(
+                format!(
                 "PR #{} head is {} on GitHub, but your local change {} and the cache are both at {}; the PR moved out-of-band — run `forklift sync` then `forklift submit` before merging",
                 entry.pr_number,
                 pr.head_ref_oid,
                 change.change_id,
                 change.commit_id
-            );
+                ),
+                "run `forklift sync`, then run `forklift submit`; submit will show the plan and ask whether to apply it. Then rerun `forklift merge`.",
+            )
+            .into());
         }
         // All three disagree — local, cache, and GitHub have fully drifted.
-        bail!(
+        return Err(MergeSubmitRequired::new(
+            format!(
             "PR #{} is out of sync: GitHub head {}, local change {} is {}, cache expects {}; run `forklift sync` then `forklift submit` before merging",
             entry.pr_number,
             pr.head_ref_oid,
             change.change_id,
             change.commit_id,
             entry.head_sha
-        );
+            ),
+            "run `forklift sync`, then run `forklift submit`; submit will show the plan and ask whether to apply it. Then rerun `forklift merge`.",
+        )
+        .into());
     }
     if !pr.base_ref_name.eq_ignore_ascii_case(&config.trunk) {
         bail!(

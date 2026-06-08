@@ -3,6 +3,7 @@ name = "forklift"
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
+build = "build.rs"
 
 # `cargo install --path .` installs each binary target listed here.
 [[bin]]
@@ -26,3 +27,6 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 tracing-logfmt = "0.3.7"
 owo-colors = "4.3.0"
 indicatif = { version = "0.18.4", default-features = false }
+
+[build-dependencies]
+vergen-git2 = { version = "10.0.0-beta.6", features = ["build", "cargo", "rustc"] }
