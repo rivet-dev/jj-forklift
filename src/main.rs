@@ -4554,6 +4554,10 @@ fn sync_stack(
         rebase_stack_roots(runner, &stack_resolution.owned, destination, diagnostics)
             .map_err(|error| phase_error("rebase-stack", revset, error))?;
 
+    if !diagnostics.dry_run {
+        let _ = report_sync_conflicts(runner, revset);
+    }
+
     if !submit {
         return Ok(SyncSummary {
             rebased_roots,
@@ -4983,6 +4987,42 @@ fn rebase_stack_roots(
     }
 
     Ok(1)
+}
+
+/// Warn about any changes left in jj's in-commit conflicted state after a
+/// rebase. jj records rebase conflicts inside the resulting commit rather than
+/// aborting, so the rebase command itself reports success even when the stack
+/// is now broken. Without this warning the user would only notice on the next
+/// `forklift status` / `submit`, which is jarring after a clean-looking sync.
+///
+/// Pre-existing conflicts cannot reach this code path: `resolve-stack` runs
+/// `validate_stack_shape` first and refuses to proceed on a conflicted input
+/// stack. Anything we surface here was introduced by *this* sync's rebase.
+#[tracing::instrument(skip_all)]
+fn report_sync_conflicts(runner: &impl CommandRunner, revset: &str) -> Result<()> {
+    let stack = match resolve_stack(runner, revset) {
+        Ok(stack) => stack,
+        Err(error) => {
+            ui_warn!("could not scan for post-sync conflicts: {error:#}");
+            return Ok(());
+        }
+    };
+    let conflicted: Vec<&ResolvedChange> =
+        stack.iter().filter(|change| change.conflict).collect();
+    if conflicted.is_empty() {
+        return Ok(());
+    }
+    ui_warn!(
+        "sync left {} conflicted change(s); resolve before submitting:",
+        conflicted.len()
+    );
+    for change in &conflicted {
+        let title = change.title.lines().next().unwrap_or("(no description)");
+        let short = change.change_id.get(..12).unwrap_or(change.change_id.as_str());
+        ui_warn!("- {short} {title}");
+        ui_warn!("    next: `jj resolve -r {}`", change.change_id);
+    }
+    Ok(())
 }
 
 #[tracing::instrument(level = "trace", skip_all)]

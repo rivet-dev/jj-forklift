@@ -391,6 +391,54 @@ fn sync_rebases_then_submits() -> anyhow::Result<()> {
 }
 
 #[test]
+fn sync_warns_when_rebase_leaves_conflicted_changes() -> anyhow::Result<()> {
+    let repo = TestRepo::new("sync-conflict-warn")?;
+    repo.init_main()?;
+
+    // Local change rewrites file.txt to "local edit\n".
+    repo.jj(&["new"])?;
+    repo.write_file("file.txt", "local edit\n")?;
+    repo.jj(&["describe", "-m", "change title", "-m", "change body"])?;
+    let change = repo.change_at("@")?;
+
+    // Remote trunk advances by rewriting the same file to a different content,
+    // so the eventual rebase onto the new trunk will produce an in-commit
+    // conflict on file.txt.
+    repo.jj(&["new", "main"])?;
+    repo.write_file("file.txt", "remote edit\n")?;
+    repo.jj(&["describe", "-m", "remote trunk advance"])?;
+    repo.jj(&["bookmark", "set", "main", "-r", "@"])?;
+    repo.jj(&["git", "push", "--remote", "origin", "--bookmark", "main"])?;
+    repo.jj(&["bookmark", "set", "--allow-backwards", "main", "-r", "@-"])?;
+    repo.jj(&["edit", &change.change_id])?;
+
+    let output = repo.run(&["sync", "--revset", REVSET])?;
+    // The user opted into "warn but exit zero": sync still reports success
+    // overall, but it must have flagged the conflict in stderr.
+    assert_success("sync with conflict", &output);
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("sync left 1 conflicted change"),
+        "sync should warn about conflict in stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(&format!("jj resolve -r {}", change.change_id)),
+        "sync should suggest `jj resolve -r <change-id>`:\n{stderr}"
+    );
+
+    // We warned but did not auto-resolve: the downstream status guard still
+    // refuses to operate on the now-conflicted stack.
+    let status = repo.run(&["status"])?;
+    assert!(!status.status.success(), "status should bail on conflict");
+    let status_stderr = stderr_of(&status);
+    assert!(
+        status_stderr.contains("unsupported stack shape: conflicted change"),
+        "status should cite the conflict:\n{status_stderr}"
+    );
+    Ok(())
+}
+
+#[test]
 fn sync_divergence_stops_before_rebase() -> anyhow::Result<()> {
     let repo = TestRepo::new("sync-divergence")?;
     repo.init_main()?;
