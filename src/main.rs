@@ -1061,7 +1061,12 @@ fn run_command(cli: Cli, runner: &impl CommandRunner, cwd: &str) -> Result<()> {
 fn phase_error(phase: &str, object: impl Display, error: anyhow::Error) -> anyhow::Error {
     let object = object.to_string();
     let inner = diagnostic_from_error(&error);
-    if phase == "resolve-pr" && inner.message == "no current PR" {
+    if phase == "resolve-pr"
+        && matches!(
+            inner.message.as_str(),
+            "no current PR" | "current revision is not submitted"
+        )
+    {
         return anyhow::Error::new(inner.detail("phase", phase).detail("object", object));
     }
     let mut cli_error = CliError::new(phase_summary(phase, &object))
@@ -4171,7 +4176,14 @@ fn resolve_pr_url(
         None => {
             ensure_default_pr_target_is_stack_change(runner, config)?;
             let change_id = current_change_id(runner)?;
-            let pr = lookup_get_target_pr(runner, github, &change_id, "pr")?;
+            let pr = lookup_get_target_pr(runner, github, &change_id, "pr").map_err(|_| {
+                CliError::new("current revision is not submitted")
+                    .reason(format!(
+                        "current change `{}` has no open PR yet",
+                        change_id_branch_prefix(&change_id)
+                    ))
+                    .resolution("run `forklift submit --yes`, then `forklift pr`")
+            })?;
             Ok((pr.number, github_pr_url(&github.repo, pr.number)))
         }
     }

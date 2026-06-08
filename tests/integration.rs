@@ -125,15 +125,16 @@ fn pr_error_is_rendered_as_a_human_diagnostic() -> anyhow::Result<()> {
     assert!(!output.status.success(), "pr without a PR should fail");
     let stderr = stderr_of(&output);
     assert!(
-        stderr.contains("error: could not resolve PR for `@`"),
+        stderr.contains("error: current revision is not submitted"),
         "stderr:\n{stderr}"
     );
     assert!(
-        stderr.contains("reason:\n  pr target `"),
+        stderr.contains("reason:\n  current change `"),
         "stderr:\n{stderr}"
     );
+    assert!(stderr.contains("has no open PR yet"), "stderr:\n{stderr}");
     assert!(
-        stderr.contains("resolution:\n  run `forklift submit --dry-run`"),
+        stderr.contains("resolution:\n  run `forklift submit --yes`, then `forklift pr`"),
         "stderr:\n{stderr}"
     );
     assert!(stderr.contains("details:"), "stderr:\n{stderr}");
