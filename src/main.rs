@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
-use std::fmt::Display;
+use std::error::Error;
+use std::fmt::{self, Display};
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process;
@@ -606,14 +607,7 @@ fn run(cli: Cli, runner: &impl CommandRunner) -> Result<()> {
         Ok(()) => tracing::debug!(command = command_name, "command complete"),
         Err(error) => {
             tracing::error!(command = command_name, error = %error, "command failed");
-            let (headline, hint) = humanize_error(&error.to_string());
-            ui_error(&headline);
-            if let Some(hint) = hint {
-                ui_hint(&format!("try `{hint}`"));
-            }
-            if let Some(path) = trace_log.path() {
-                eprintln!("debug log: {}", path.display());
-            }
+            render_cli_error(error, trace_log.path());
         }
     }
 
@@ -830,9 +824,239 @@ fn run_command(cli: Cli, runner: &impl CommandRunner, cwd: &str) -> Result<()> {
 
 #[tracing::instrument(skip_all)]
 fn phase_error(phase: &str, object: impl Display, error: anyhow::Error) -> anyhow::Error {
-    anyhow!(
-        "phase={phase} object={object} error={error} safe-next-command=`forklift submit --dry-run`"
-    )
+    let object = object.to_string();
+    let inner = diagnostic_from_error(&error);
+    let mut cli_error = CliError::new(phase_summary(phase, &object))
+        .reason(reason_from_error(&error, &inner))
+        .resolution(inner.resolution.unwrap_or_else(|| {
+            "run `forklift submit --dry-run` to preview the stack state".to_owned()
+        }))
+        .detail("phase", phase)
+        .detail("object", object);
+    cli_error.details.extend(inner.details);
+    anyhow::Error::new(cli_error)
+}
+
+fn reason_from_error(error: &anyhow::Error, diagnostic: &CliError) -> String {
+    if error.chain().count() > 1 {
+        return format!("{error:#}");
+    }
+    diagnostic
+        .reason
+        .clone()
+        .unwrap_or_else(|| diagnostic.message.clone())
+}
+
+#[derive(Debug, Clone)]
+struct CliError {
+    message: String,
+    reason: Option<String>,
+    resolution: Option<String>,
+    details: Vec<(&'static str, String)>,
+}
+
+impl CliError {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            reason: None,
+            resolution: None,
+            details: Vec::new(),
+        }
+    }
+
+    fn reason(mut self, reason: impl Into<String>) -> Self {
+        let reason = reason.into();
+        if !reason.trim().is_empty() {
+            self.reason = Some(reason);
+        }
+        self
+    }
+
+    fn resolution(mut self, resolution: impl Into<String>) -> Self {
+        let resolution = resolution.into();
+        if !resolution.trim().is_empty() {
+            self.resolution = Some(resolution);
+        }
+        self
+    }
+
+    fn detail(mut self, key: &'static str, value: impl Display) -> Self {
+        let value = value.to_string();
+        if !value.trim().is_empty() {
+            self.details.push((key, value));
+        }
+        self
+    }
+}
+
+impl Display for CliError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl Error for CliError {}
+
+fn phase_summary(phase: &str, object: &str) -> String {
+    match phase {
+        "resolve-config" => "could not resolve configuration".to_owned(),
+        "startup-config" => "could not prepare jj config".to_owned(),
+        "resolve-stack" => format!("could not resolve stack `{object}`"),
+        "resolve-merge-target" => format!("could not resolve merge target `{object}`"),
+        "merge-refresh-above" => format!("could not refresh stack above `{object}`"),
+        "resolve-github" => format!("could not resolve GitHub context for `{object}`"),
+        "resolve-pr" => format!("could not resolve PR for `{object}`"),
+        "open-pr" => format!("could not open PR URL `{object}`"),
+        "status" => format!("could not build status for `{object}`"),
+        _ => format!("failed during {phase}"),
+    }
+}
+
+fn render_cli_error(error: &anyhow::Error, debug_log: Option<&Path>) {
+    let mut diagnostic = diagnostic_from_error(error);
+    if let Some(path) = debug_log {
+        diagnostic
+            .details
+            .retain(|(key, _)| *key != "debug log" && *key != "log");
+        diagnostic
+            .details
+            .push(("debug log", path.display().to_string()));
+    }
+
+    print_error_line(&diagnostic.message);
+    print_section("reason", diagnostic.reason.as_deref());
+    print_section("resolution", diagnostic.resolution.as_deref());
+    print_details(&diagnostic.details);
+}
+
+fn diagnostic_from_error(error: &anyhow::Error) -> CliError {
+    for cause in error.chain() {
+        if let Some(cli_error) = cause.downcast_ref::<CliError>() {
+            return cli_error.clone();
+        }
+    }
+
+    let mut chain = error.chain();
+    let message = chain
+        .next()
+        .map(ToString::to_string)
+        .unwrap_or_else(|| "command failed".to_owned());
+    let mut diagnostic = diagnostic_from_message(&message);
+    let causes = chain.map(ToString::to_string).collect::<Vec<_>>();
+    if diagnostic.reason.is_none() && !causes.is_empty() {
+        diagnostic.reason = Some(causes.join(": "));
+    }
+    diagnostic
+}
+
+fn diagnostic_from_message(message: &str) -> CliError {
+    let mut diagnostic = if let Some(phase) = structured_value(message, "phase=") {
+        let object = structured_value(message, "object=").unwrap_or_default();
+        CliError::new(phase_summary(&phase, &object)).detail("phase", phase)
+    } else if message.contains("failed-command=`") {
+        CliError::new("command failed")
+    } else if message.contains("failed-api=`") {
+        CliError::new("GitHub API request failed")
+    } else {
+        CliError::new(message.trim())
+    };
+
+    if let Some(object) = structured_value(message, "object=") {
+        diagnostic = diagnostic.detail("object", object);
+    }
+    if let Some(command) = backtick_value(message, "failed-command=`") {
+        diagnostic = diagnostic.detail("command", command);
+    }
+    if let Some(api) = backtick_value(message, "failed-api=`") {
+        diagnostic = diagnostic.detail("api", api);
+    }
+    if let Some(reason) = structured_error_reason(message) {
+        diagnostic = diagnostic.reason(reason);
+    }
+    if let Some(command) = backtick_value(message, "safe-next-command=`") {
+        diagnostic = diagnostic.resolution(format!("run `{command}`"));
+    }
+
+    diagnostic
+}
+
+fn structured_error_reason(message: &str) -> Option<String> {
+    let start = message.find("error=")? + "error=".len();
+    let mut end = message.len();
+    for marker in [
+        " safe-next-command=",
+        " failed-command=",
+        " failed-api=",
+        " phase=",
+        " object=",
+    ] {
+        if let Some(offset) = message[start..].find(marker) {
+            end = end.min(start + offset);
+        }
+    }
+    let reason = message[start..end].trim();
+    (!reason.is_empty()).then(|| reason.to_owned())
+}
+
+fn structured_value(message: &str, key: &str) -> Option<String> {
+    let start = message.find(key)? + key.len();
+    let value = message[start..]
+        .split_once(' ')
+        .map(|(value, _)| value)
+        .unwrap_or(&message[start..])
+        .trim();
+    (!value.is_empty()).then(|| value.trim_matches('`').to_owned())
+}
+
+fn backtick_value(message: &str, key: &str) -> Option<String> {
+    let start = message.find(key)? + key.len();
+    let value = message[start..].split_once('`')?.0.trim();
+    (!value.is_empty()).then(|| value.to_owned())
+}
+
+fn print_error_line(message: &str) {
+    if ui_color_enabled() {
+        eprintln!("{} {}", "error:".red().bold(), message);
+    } else {
+        eprintln!("error: {message}");
+    }
+}
+
+fn print_section(label: &str, value: Option<&str>) {
+    let Some(value) = value else {
+        return;
+    };
+    eprintln!();
+    if ui_color_enabled() {
+        eprintln!("{}", format!("{label}:").cyan().bold());
+    } else {
+        eprintln!("{label}:");
+    }
+    for line in value.lines() {
+        eprintln!("  {line}");
+    }
+}
+
+fn print_details(details: &[(&'static str, String)]) {
+    if details.is_empty() {
+        return;
+    }
+    eprintln!();
+    if ui_color_enabled() {
+        eprintln!("{}", "details:".cyan().bold());
+    } else {
+        eprintln!("details:");
+    }
+    let width = details
+        .iter()
+        .map(|(key, _)| key.len() + 1)
+        .max()
+        .unwrap_or(0);
+    for (key, value) in details {
+        let label = format!("{key}:");
+        eprintln!("  {label:width$} {value}");
+    }
 }
 
 /// Turns an internal structured error string (the `phase=… object=… error=…

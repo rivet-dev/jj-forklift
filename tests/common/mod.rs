@@ -639,9 +639,7 @@ pub fn stack_comment_body(
         .iter()
         .find(|(change_id, _, _, _, _)| *change_id == current_change_id)
     {
-        body.push_str(&format!(
-            "Check out this stack: `forklift get {number}`\n"
-        ));
+        body.push_str(&format!("Check out this stack: `forklift get {number}`\n"));
     }
     body.push_str("Pull/update this stack: `forklift sync`\n");
     body.push_str("Publish local edits: `forklift submit`\n");

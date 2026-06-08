@@ -77,6 +77,39 @@ fn submit_dry_run_skips_cache_writes() -> anyhow::Result<()> {
 }
 
 #[test]
+fn pr_error_is_rendered_as_a_human_diagnostic() -> anyhow::Result<()> {
+    let repo = TestRepo::new("pr-error")?;
+    repo.init_main()?;
+    repo.create_change("change", "change title", "change body")?;
+
+    let output = repo.run(&["pr"])?;
+    assert!(!output.status.success(), "pr without a PR should fail");
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("error: could not resolve PR for `@`"),
+        "stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("reason:\n  pr target `"),
+        "stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("resolution:\n  run `forklift submit --dry-run`"),
+        "stderr:\n{stderr}"
+    );
+    assert!(stderr.contains("details:"), "stderr:\n{stderr}");
+    assert!(
+        stderr.contains("phase:     resolve-pr"),
+        "stderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("phase=resolve-pr object=@"),
+        "stderr:\n{stderr}"
+    );
+    Ok(())
+}
+
+#[test]
 fn two_change_submit_uses_parent_head_branch_base() -> anyhow::Result<()> {
     let repo = TestRepo::new("two-submit")?;
     repo.init_main()?;
@@ -366,6 +399,47 @@ fn clean_two_pr_merge_fast_forwards_trunk_and_merges_by_reachability() -> anyhow
             "PR #{number} should be merged"
         );
     }
+    Ok(())
+}
+
+#[test]
+fn merge_refuses_open_frozen_dependency_below_owned_pr() -> anyhow::Result<()> {
+    let repo = TestRepo::new("merge-open-frozen-dependency")?;
+    repo.init_main()?;
+    let main = repo.bookmark_target("main")?;
+    let stack = repo.create_linear_stack(2)?;
+    let bottom = branch_for("change-1-title", &stack[0].change_id);
+    let top = branch_for("change-2-title", &stack[1].change_id);
+    repo.set_bookmark(&bottom, &stack[0].commit_id)?;
+    repo.set_bookmark(&top, &stack[1].commit_id)?;
+    repo.push_bookmark(&bottom)?;
+    repo.push_bookmark(&top)?;
+    repo.seed_pr(11, &bottom, "main", "change 1 title", "change 1 body")?;
+    repo.seed_pr(12, &top, &bottom, "change 2 title", "change 2 body")?;
+    repo.set_bookmark("jj-stack/frozen/pr-11", &stack[0].commit_id)?;
+
+    let output = repo.run(&["merge"])?;
+    assert!(
+        !output.status.success(),
+        "merge should fail while lower dependency PR is open\nstdout:\n{}\nstderr:\n{}\nprs:\n{:#?}",
+        stdout_of(&output),
+        stderr_of(&output),
+        repo.stored_prs()?
+    );
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("frozen dependency")
+            && stderr.contains("PR #11")
+            && stderr.contains("still open"),
+        "stderr:\n{stderr}"
+    );
+    assert_eq!(
+        repo.git_remote_branch_target("main")?,
+        main,
+        "merge must not advance trunk"
+    );
+    assert_eq!(repo.stored_pr(11)?["state"], json!("OPEN"));
+    assert_eq!(repo.stored_pr(12)?["state"], json!("OPEN"));
     Ok(())
 }
 
