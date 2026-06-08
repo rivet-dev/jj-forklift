@@ -465,7 +465,7 @@ fn display_command(program: &str, args: &[&str]) -> String {
 #[test]
 fn submit_outside_jj_repo_fails_with_clear_error() -> anyhow::Result<()> {
     let dir = unique_dir("no-jj-repo")?;
-    let output = Command::new(env!("CARGO_BIN_EXE_jj-stack"))
+    let output = Command::new(env!("CARGO_BIN_EXE_forklift"))
         .args(["submit", "--dry-run"])
         .current_dir(&dir)
         .output()?;
