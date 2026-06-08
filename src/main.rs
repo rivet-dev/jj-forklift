@@ -23,6 +23,8 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use unicode_normalization::UnicodeNormalization;
 
+use forklift::empty_string_to_none;
+
 /// Global toggle controlling whether the user-facing `ui_*` macros emit ANSI
 /// color escapes. Set once via [`init_ui`]; defaults to colored output.
 static UI_COLOR: OnceLock<bool> = OnceLock::new();
@@ -8233,7 +8235,11 @@ struct GhMergePr {
     created_at: String,
     #[serde(default, rename = "isDraft")]
     is_draft: bool,
-    #[serde(default, rename = "reviewDecision")]
+    #[serde(
+        default,
+        rename = "reviewDecision",
+        deserialize_with = "empty_string_to_none"
+    )]
     review_decision: Option<String>,
     #[serde(default)]
     mergeable: Option<String>,
