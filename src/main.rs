@@ -1503,10 +1503,12 @@ fn validate_ref_component(name: &str, value: String) -> Result<String> {
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '-' | '_' | '.'));
     if !valid {
-        bail!(
-            "invalid {CONFIG_PREFIX}.{name} value `{value}`: must be a plain ref name \
-             (letters, digits, `/`, `-`, `_`, `.`; no leading `-`, whitespace, `:`, glob, or `..`)"
-        );
+        bail!(CliError::new(format!(
+            "invalid {CONFIG_PREFIX}.{name} value `{value}`"
+        ))
+        .resolution(
+            "use a plain ref name (letters, digits, `/`, `-`, `_`, `.`; no leading `-`, whitespace, `:`, glob, or `..`)"
+        ));
     }
     Ok(value)
 }
@@ -1566,10 +1568,8 @@ fn ensure_jj_repo(runner: &impl CommandRunner, cwd: &str) -> Result<()> {
         return Ok(());
     }
 
-    bail!(
-        "not inside a jj repository (cwd={cwd}); run jj-stack from within your repo, \
-         or initialize one with `jj git init --colocate`"
-    );
+    bail!(CliError::new(format!("not inside a jj repository (cwd={cwd})"))
+        .resolution("run from within your repo, or initialize one with `jj git init --colocate`"));
 }
 
 #[tracing::instrument(skip_all)]
@@ -1610,9 +1610,9 @@ fn plan_startup_config(
 
     match frozen {
         Some(value) if value == JJ_FROZEN_ALIAS_VALUE => {}
-        Some(value) => bail!(
-            "repo config `{JJ_CONFIG_FROZEN_ALIAS_KEY}` is `{value}`, expected `{JJ_FROZEN_ALIAS_VALUE}`; refusing to overwrite custom frozen-heads alias"
-        ),
+        Some(value) => bail!(CliError::new(format!(
+            "repo config `{JJ_CONFIG_FROZEN_ALIAS_KEY}` is `{value}`, expected `{JJ_FROZEN_ALIAS_VALUE}`"
+        ))),
         None => actions.push(StartupConfigAction {
             key: JJ_CONFIG_FROZEN_ALIAS_KEY,
             value: JJ_FROZEN_ALIAS_VALUE.to_owned(),
@@ -1629,9 +1629,9 @@ fn plan_startup_config(
         JJ_REQUIRED_IMMUTABLE_ALIAS_VALUE => {}
         JJ_WRAPPED_IMMUTABLE_ALIAS_VALUE => {
             if base.is_none() {
-                bail!(
-                    "repo config `{JJ_CONFIG_IMMUTABLE_ALIAS_KEY}` already wraps `{JJ_CONFIG_BASE_IMMUTABLE_ALIAS_KEY}`, but the base alias is missing; refusing to guess the original immutable revset"
-                );
+                bail!(CliError::new(format!(
+                    "repo config `{JJ_CONFIG_IMMUTABLE_ALIAS_KEY}` wraps `{JJ_CONFIG_BASE_IMMUTABLE_ALIAS_KEY}`, but the base alias is missing"
+                )));
             }
         }
         value if value.contains("forklift_frozen_heads()") => {}
@@ -1646,9 +1646,9 @@ fn plan_startup_config(
                     value: JJ_WRAPPED_IMMUTABLE_ALIAS_VALUE.to_owned(),
                 });
             }
-            Some(existing_base) => bail!(
-                "repo config `{JJ_CONFIG_IMMUTABLE_ALIAS_KEY}` is custom (`{custom}`), but `{JJ_CONFIG_BASE_IMMUTABLE_ALIAS_KEY}` already exists as `{existing_base}`; refusing to wrap ambiguous immutable config"
-            ),
+            Some(existing_base) => bail!(CliError::new(format!(
+                "repo config `{JJ_CONFIG_IMMUTABLE_ALIAS_KEY}` is custom (`{custom}`), but `{JJ_CONFIG_BASE_IMMUTABLE_ALIAS_KEY}` already exists as `{existing_base}`"
+            ))),
         },
     }
 
@@ -2853,11 +2853,11 @@ fn repair_stack_comments(
     diagnostics.phase("resolve-stack-comment");
     let target_pr = resolve_get_target_pr(runner, &github, target)?;
     if !target_pr.state.eq_ignore_ascii_case("OPEN") {
-        bail!(
-            "repair target PR #{} is {}; choose an open PR whose stack comment should be repaired",
-            target_pr.number,
-            target_pr.state
-        );
+        bail!(CliError::new(format!(
+            "repair target PR #{} is {}",
+            target_pr.number, target_pr.state
+        ))
+        .resolution("choose an open PR whose stack comment should be repaired"));
     }
     let comment = latest_stack_comment(runner, &github, target_pr.number, "repair")?;
     let mut pr_numbers = comment
@@ -3294,10 +3294,10 @@ fn validate_repair_result(
         plan_stack_comment_repair(runner, config, github, target_pr_number, pr_numbers)
             .context("re-run repair detection on repaired stack comment")?;
     if !validation_plan.pruned_merged_prs.is_empty() {
-        bail!(
+        bail!(CliError::new(format!(
             "repair validation failed: repaired stack comment still lists merged PR(s): {}",
             repair_pr_list(&validation_plan.pruned_merged_prs)
-        );
+        )));
     }
 
     let expected = plan.open_prs.iter().map(|pr| pr.number).collect::<Vec<_>>();
@@ -3307,11 +3307,9 @@ fn validate_repair_result(
         .map(|pr| pr.number)
         .collect::<Vec<_>>();
     if actual != expected {
-        bail!(
-            "repair validation failed: stack comment lists {:?}, expected {:?}",
-            actual,
-            expected,
-        );
+        bail!(CliError::new(format!(
+            "repair validation failed: stack comment lists {actual:?}, expected {expected:?}"
+        )));
     }
 
     Ok(())
@@ -3357,10 +3355,10 @@ fn plan_stack_comment_repair(
     }
 
     if !open_prs.iter().any(|pr| pr.number == target_pr_number) {
-        bail!(
-            "repair would remove target PR #{}; choose an open PR still in the stack",
-            target_pr_number
-        );
+        bail!(CliError::new(format!(
+            "repair would remove target PR #{target_pr_number}"
+        ))
+        .resolution("choose an open PR still in the stack"));
     }
     validate_get_pr_stack(config, github, target_pr_number, &open_prs)?;
 
@@ -3461,12 +3459,12 @@ fn unfreeze_stack(
         let change = resolve_stack(runner, &pr.head_ref_oid)
             .and_then(|stack| {
                 let [change] = stack.as_slice() else {
-                    bail!(
-                        "adopted PR #{} head {} resolved to {} jj changes; expected exactly one",
+                    bail!(CliError::new(format!(
+                        "adopted PR #{} head {} resolved to {} changes, expected one",
                         pr.number,
-                        pr.head_ref_oid,
+                        short_commit_id(&pr.head_ref_oid),
                         stack.len()
-                    );
+                    )));
                 };
                 Ok(change.clone())
             })
@@ -3492,35 +3490,31 @@ fn unfreeze_stack(
 fn validate_unfreeze_pr(config: &AppConfig, github: &GitHubContext, pr: &GhPr) -> Result<()> {
     validate_get_pr_metadata(github, pr)?;
     if !pr.state.eq_ignore_ascii_case("OPEN") {
-        bail!(
-            "unfreeze only supports open PRs; PR #{} is {}",
-            pr.number,
-            pr.state
-        );
+        bail!(CliError::new(format!(
+            "PR #{} is {}, expected open",
+            pr.number, pr.state
+        ))
+        .resolution("unfreeze only supports open PRs"));
     }
     let head_repo = get_pr_repo(pr, "head")?;
     let base_repo = get_pr_repo(pr, "base")?;
     if head_repo.name_with_owner != github.repo {
-        bail!(
+        bail!(CliError::new(format!(
             "cannot unfreeze fork-backed PR #{}: head repo is `{}`, expected `{}`",
-            pr.number,
-            head_repo.name_with_owner,
-            github.repo
-        );
+            pr.number, head_repo.name_with_owner, github.repo
+        )));
     }
     if base_repo.name_with_owner != github.repo {
-        bail!(
+        bail!(CliError::new(format!(
             "cannot unfreeze PR #{}: base repo is `{}`, expected `{}`",
-            pr.number,
-            base_repo.name_with_owner,
-            github.repo
-        );
+            pr.number, base_repo.name_with_owner, github.repo
+        )));
     }
     if pr.base_ref_name.is_empty() || pr.head_ref_name.is_empty() {
-        bail!(
+        bail!(CliError::new(format!(
             "cannot unfreeze PR #{} with empty head/base branch",
             pr.number
-        );
+        )));
     }
     validate_ref_component("head branch", pr.head_ref_name.clone())?;
     validate_ref_component("base branch", pr.base_ref_name.clone())?;
@@ -3541,11 +3535,10 @@ fn verify_repo_push_permission(runner: &impl CommandRunner, github: &GitHubConte
         );
     }
     if output.stdout.trim() != "true" {
-        bail!(
-            "GitHub actor `{}` does not have push permission to `{}`; cannot unfreeze PR branch for adoption",
-            github.username,
-            github.repo
-        );
+        bail!(CliError::new(format!(
+            "GitHub actor `{}` lacks push permission to `{}`",
+            github.username, github.repo
+        )));
     }
     Ok(())
 }
@@ -3716,9 +3709,11 @@ fn verify_revision_mutable(runner: &impl CommandRunner, rev: &str) -> Result<()>
     if immutable == "false" {
         return Ok(());
     }
-    bail!(
-        "revision {rev} is still immutable after removing the frozen bookmark; remaining immutable blocker may be another frozen bookmark, tag, trunk, or untracked remote bookmark"
-    )
+    bail!(CliError::new(format!(
+        "revision {} is still immutable after removing the frozen bookmark",
+        short_commit_id(rev)
+    ))
+    .reason("remaining blocker may be another frozen bookmark, tag, trunk, or untracked remote bookmark"))
 }
 
 #[tracing::instrument(skip_all, fields(rev = %rev, pr = pr_number))]
@@ -3743,13 +3738,14 @@ fn diagnose_unfrozen_revision_immutable(
     rev: &str,
     pr_number: u64,
 ) -> Result<CliError> {
+    let short_rev = short_commit_id(rev);
     if git_commit_is_ancestor(runner, rev, &format!("{}@{}", config.trunk, config.remote))? {
         return Ok(CliError::new(format!(
             "cannot unfreeze PR #{pr_number} because it is already reachable from trunk {}",
             config.trunk
         ))
         .reason(format!(
-            "PR #{pr_number} resolves to {rev}, which is already contained in `{}`.",
+            "PR #{pr_number} resolves to {short_rev}, which is already contained in `{}`.",
             config.trunk
         ))
         .resolution(format!(
@@ -3774,7 +3770,7 @@ fn diagnose_unfrozen_revision_immutable(
             "cannot unfreeze PR #{pr_number} because untracked remote bookmarks still make it immutable"
         ))
         .reason(format!(
-            "PR #{pr_number} resolves to {rev}, but it is still an ancestor of untracked remote bookmark(s): {labels}{suffix}."
+            "PR #{pr_number} resolves to {short_rev}, but it is still an ancestor of untracked remote bookmark(s): {labels}{suffix}."
         ))
         .resolution("track or delete the listed remote bookmarks, then rerun `forklift unfreeze`"));
     }
@@ -3783,7 +3779,7 @@ fn diagnose_unfrozen_revision_immutable(
         "cannot unfreeze PR #{pr_number} because it is still immutable"
     ))
     .reason(format!(
-        "PR #{pr_number} resolves to {rev}, but jj still reports that revision as immutable after removing the frozen bookmark."
+        "PR #{pr_number} resolves to {short_rev}, but jj still reports that revision as immutable after removing the frozen bookmark."
     ))
     .resolution(
         "inspect `immutable_heads()` for another blocker such as a tag, custom immutable alias, or another frozen namespace",
@@ -3851,40 +3847,34 @@ fn validate_get_pr_stack(
         }
         validate_get_pr_metadata(github, pr)?;
         if !pr.state.eq_ignore_ascii_case("OPEN") {
-            bail!(
-                "get only supports open PRs; PR #{} is {}",
-                pr.number,
-                pr.state
-            );
+            bail!(CliError::new(format!(
+                "PR #{} is {}, expected open",
+                pr.number, pr.state
+            ))
+            .resolution("get only supports open PRs"));
         }
 
         let head_repo = get_pr_repo(pr, "head")?;
         let base_repo = get_pr_repo(pr, "base")?;
         if head_repo.name_with_owner != github.repo {
-            bail!(
+            bail!(CliError::new(format!(
                 "fork-backed PR #{} is unsupported for get: head repo is `{}`, expected `{}`",
-                pr.number,
-                head_repo.name_with_owner,
-                github.repo
-            );
+                pr.number, head_repo.name_with_owner, github.repo
+            )));
         }
         if base_repo.name_with_owner != github.repo {
-            bail!(
+            bail!(CliError::new(format!(
                 "fork-backed PR #{} is unsupported for get: base repo is `{}`, expected `{}`",
-                pr.number,
-                base_repo.name_with_owner,
-                github.repo
-            );
+                pr.number, base_repo.name_with_owner, github.repo
+            )));
         }
 
         if index == 0 {
             if pr.base_ref_name != config.trunk {
-                bail!(
+                bail!(CliError::new(format!(
                     "stack topology mismatch for bottom PR #{}: base branch is `{}`, expected trunk `{}`",
-                    pr.number,
-                    pr.base_ref_name,
-                    config.trunk
-                );
+                    pr.number, pr.base_ref_name, config.trunk
+                )));
             }
         } else {
             let previous = &prs[index - 1];
@@ -3892,7 +3882,7 @@ fn validate_get_pr_stack(
             if base_repo.name_with_owner != previous_head_repo.name_with_owner
                 || pr.base_ref_name != previous.head_ref_name
             {
-                bail!(
+                bail!(CliError::new(format!(
                     "stack topology mismatch for PR #{}: base is `{}/{}`, expected previous PR #{} head `{}/{}`",
                     pr.number,
                     base_repo.name_with_owner,
@@ -3900,16 +3890,16 @@ fn validate_get_pr_stack(
                     previous.number,
                     previous_head_repo.name_with_owner,
                     previous.head_ref_name
-                );
+                )));
             }
             if pr.base_ref_oid != previous.head_ref_oid {
-                bail!(
+                bail!(CliError::new(format!(
                     "stack topology mismatch for PR #{}: base SHA is {}, expected previous PR #{} head SHA {}",
                     pr.number,
-                    pr.base_ref_oid,
+                    short_commit_id(&pr.base_ref_oid),
                     previous.number,
-                    previous.head_ref_oid
-                );
+                    short_commit_id(&previous.head_ref_oid)
+                )));
             }
         }
     }
@@ -4004,28 +3994,28 @@ fn resolve_get_pr_changes(
             format!("resolve fetched PR #{} head {}", pr.number, pr.head_ref_oid)
         })?;
         let [change] = stack.as_slice() else {
-            bail!(
-                "fetched PR #{} head {} resolved to {} jj changes; expected exactly one",
+            bail!(CliError::new(format!(
+                "fetched PR #{} head {} resolved to {} changes, expected one",
                 pr.number,
-                pr.head_ref_oid,
+                short_commit_id(&pr.head_ref_oid),
                 stack.len()
-            );
+            )));
         };
         if change.commit_id != pr.head_ref_oid {
-            bail!(
+            bail!(CliError::new(format!(
                 "fetched PR #{} head resolved to {}, expected {}",
                 pr.number,
-                change.commit_id,
-                pr.head_ref_oid
-            );
+                short_commit_id(&change.commit_id),
+                short_commit_id(&pr.head_ref_oid)
+            )));
         }
         if change.conflict {
-            bail!(
+            bail!(CliError::new(format!(
                 "fetched PR #{} head is conflicted at {} ({})",
                 pr.number,
-                change.change_id,
-                change.commit_id
-            );
+                short_change_id(&change.change_id),
+                short_commit_id(&change.commit_id)
+            )));
         }
         changes.insert(pr.number, change.clone());
     }
@@ -4058,13 +4048,14 @@ fn update_get_frozen_bookmarks(
             && bookmark.commit_id != pr.head_ref_oid
             && !git_commit_is_ancestor(runner, &bookmark.commit_id, &pr.head_ref_oid)?
         {
-            bail!(
-                "frozen bookmark `{}` points at {}, which is not an ancestor of fetched PR #{} head {}; refusing divergent collaborator rewrite. Delete or move the frozen bookmark manually after inspecting the rewrite.",
+            bail!(CliError::new(format!(
+                "frozen bookmark `{}` points at {}, not an ancestor of fetched PR #{} head {}",
                 bookmark.name,
-                bookmark.commit_id,
+                short_commit_id(&bookmark.commit_id),
                 pr.number,
-                pr.head_ref_oid
-            );
+                short_commit_id(&pr.head_ref_oid)
+            ))
+            .resolution("delete or move the frozen bookmark manually after inspecting the rewrite"));
         }
     }
 
@@ -4126,9 +4117,9 @@ impl GetTarget {
 fn parse_get_target(target: &str, default_repo: &str) -> Result<GetTarget> {
     let target = target.trim();
     if target.is_empty() {
-        bail!(
-            "get target must be a PR number, GitHub pull request URL, branch name, or change id prefix"
-        );
+        bail!(CliError::new("missing get target").resolution(
+            "pass a PR number, GitHub pull request URL, branch name, or change id prefix"
+        ));
     }
 
     if let Ok(number) = target.parse::<u64>() {
@@ -4146,9 +4137,9 @@ fn parse_get_target(target: &str, default_repo: &str) -> Result<GetTarget> {
     };
     let parts = after_host.split('/').collect::<Vec<_>>();
     if parts.len() < 4 || parts[2] != "pull" {
-        bail!(
-            "get target must be a PR number, GitHub pull request URL, branch name, or change id prefix"
-        );
+        bail!(CliError::new(format!("invalid get target `{target}`")).resolution(
+            "pass a PR number, GitHub pull request URL, branch name, or change id prefix"
+        ));
     }
     let number = parts[3]
         .split(|ch: char| !ch.is_ascii_digit())
@@ -4308,9 +4299,12 @@ fn lookup_get_target_pr(
     }
 
     let Some(prefix) = change_prefix_get_target(target) else {
-        bail!(
-            "{purpose} target `{target}` did not match an open PR branch; pass a PR number, PR URL, exact branch name, or at least 8 chars of the jj change id"
-        );
+        bail!(CliError::new(format!(
+            "{purpose} target `{target}` did not match an open PR branch"
+        ))
+        .resolution(
+            "pass a PR number, PR URL, exact branch name, or at least 8 chars of the jj change id"
+        ));
     };
     let change_matches = prs
         .into_iter()
@@ -5395,14 +5389,15 @@ fn verify_prs_merged(
     if let Some(progress) = progress {
         ui_finish_progress_bar(progress);
     }
-    bail!(
-        "PRs not marked merged after push: {}; their head commits are in trunk but GitHub has not closed them",
+    bail!(CliError::new(format!(
+        "PRs not marked merged after push: {}",
         pending
             .iter()
             .map(|n| format!("#{n}"))
             .collect::<Vec<_>>()
             .join(", ")
-    );
+    ))
+    .reason("their head commits are in trunk but GitHub has not closed them"));
 }
 
 fn pr_is_merged(
@@ -5739,19 +5734,18 @@ fn validate_merge_frozen_dependencies(
             dependency.bookmark.pr_number,
         )?;
         if pr.state.eq_ignore_ascii_case("OPEN") {
-            bail!(
-                "frozen dependency `{}` is still open as PR #{}; merge dependencies first, then run `forklift sync` before merging owned PRs",
-                dependency.bookmark.name,
-                pr.number
-            );
+            bail!(CliError::new(format!(
+                "frozen dependency `{}` is still open as PR #{}",
+                dependency.bookmark.name, pr.number
+            ))
+            .resolution("merge dependencies, then run `forklift sync`"));
         }
         if !pr.state.eq_ignore_ascii_case("MERGED") {
-            bail!(
-                "frozen dependency `{}` PR #{} is `{}`; run `forklift sync` before merging owned PRs",
-                dependency.bookmark.name,
-                pr.number,
-                pr.state
-            );
+            bail!(CliError::new(format!(
+                "frozen dependency `{}` PR #{} is `{}`",
+                dependency.bookmark.name, pr.number, pr.state
+            ))
+            .resolution("run `forklift sync` before merging owned PRs"));
         }
     }
 
@@ -5759,12 +5753,11 @@ fn validate_merge_frozen_dependencies(
         .base_ref_name
         .eq_ignore_ascii_case(&config.trunk)
     {
-        bail!(
-            "frozen dependencies are merged, but bottom owned PR #{} still targets `{}` instead of trunk `{}`; run `forklift sync` before merging",
-            bottom_owned_pr.number,
-            bottom_owned_pr.base_ref_name,
-            config.trunk
-        );
+        bail!(CliError::new(format!(
+            "bottom owned PR #{} targets `{}`, expected trunk `{}`",
+            bottom_owned_pr.number, bottom_owned_pr.base_ref_name, config.trunk
+        ))
+        .resolution("run `forklift sync` before merging"));
     }
 
     Ok(())
@@ -5801,12 +5794,10 @@ fn resolve_merge_cached_pr(
 ) -> Result<(PrCacheEntry, GhMergePr)> {
     let pr = fetch_pr_for_merge(runner, github, &change.change_id, entry.pr_number)?;
     if pr.head_ref_name != entry.head_branch {
-        bail!(
+        bail!(CliError::new(format!(
             "cache points to PR #{} on `{}`, but GitHub reports `{}`",
-            entry.pr_number,
-            entry.head_branch,
-            pr.head_ref_name
-        );
+            entry.pr_number, entry.head_branch, pr.head_ref_name
+        )));
     }
 
     let live_entry = pr.clone().into_cache_entry(entry.stack_comment_id.clone());
@@ -5829,12 +5820,10 @@ fn resolve_merge_pr_from_live_bookmarks(
             validate_submit_bookmark_state(runner, config, change, &entry)?;
             let pr = fetch_pr_for_merge(runner, github, &change.change_id, entry.pr_number)?;
             if pr.head_ref_name != head_branch {
-                bail!(
+                bail!(CliError::new(format!(
                     "PR #{} head branch is `{}`, but live bookmark discovery found `{}`",
-                    entry.pr_number,
-                    pr.head_ref_name,
-                    head_branch
-                );
+                    entry.pr_number, pr.head_ref_name, head_branch
+                )));
             }
             matches.push((entry.stack_comment_id.clone(), pr));
         }
@@ -5852,11 +5841,11 @@ fn resolve_merge_pr_from_live_bookmarks(
         )
         .with_phase("merge-pr-lookup", change.change_id.clone())
         .into()),
-        _ => bail!(
-            "multiple live tracked PRs found for {}/{}; refusing to choose before merge",
+        _ => bail!(CliError::new(format!(
+            "multiple live tracked PRs found for {}/{}",
             github.repo,
-            change.change_id
-        ),
+            short_change_id(&change.change_id)
+        ))),
     }
 }
 
@@ -5996,18 +5985,17 @@ fn validate_pr_ready_for_merge(
     admin: bool,
 ) -> Result<()> {
     if !pr.state.eq_ignore_ascii_case("OPEN") {
-        bail!(
-            "PR #{} for {} is `{}`; only open PRs can be merged",
+        bail!(CliError::new(format!(
+            "PR #{} for {} is `{}`",
             entry.pr_number,
-            change.change_id,
+            short_change_id(&change.change_id),
             pr.state
-        );
+        ))
+        .resolution("only open PRs can be merged"));
     }
     if pr.is_draft {
-        bail!(
-            "PR #{} is draft; mark it ready for review before merge",
-            entry.pr_number
-        );
+        bail!(CliError::new(format!("PR #{} is a draft", entry.pr_number))
+            .resolution("mark it ready for review"));
     }
     // The PR's GitHub head, the local jj commit, and our cache must all agree
     // before merging — otherwise we'd land code that isn't what's checked out.
@@ -6058,12 +6046,11 @@ fn validate_pr_ready_for_merge(
         .into());
     }
     if !pr.base_ref_name.eq_ignore_ascii_case(&config.trunk) {
-        bail!(
-            "PR #{} base is `{}`, but the bottom of the stack must target trunk `{}`; run `forklift submit` to repoint the base before merging",
-            entry.pr_number,
-            pr.base_ref_name,
-            config.trunk
-        );
+        bail!(CliError::new(format!(
+            "PR #{} base is `{}`, expected trunk `{}`",
+            entry.pr_number, pr.base_ref_name, config.trunk
+        ))
+        .resolution("run `forklift submit` to repoint the base"));
     }
     if config.require_approval && pr.review_decision.as_deref() != Some("APPROVED") {
         return Err(CliError::new(format!(
@@ -6077,17 +6064,18 @@ fn validate_pr_ready_for_merge(
         .into());
     }
     if pr.auto_merge_request.is_some() {
-        bail!(
-            "PR #{} has auto-merge enabled; disable auto-merge before using direct squash merge",
+        bail!(CliError::new(format!(
+            "PR #{} has auto-merge enabled",
             entry.pr_number
-        );
+        ))
+        .resolution("disable auto-merge before using direct squash merge"));
     }
     if pr.mergeable.as_deref() != Some("MERGEABLE") {
-        bail!(
-            "PR #{} is not mergeable; mergeable is `{}`",
+        bail!(CliError::new(format!(
+            "PR #{} is not mergeable (mergeable is `{}`)",
             entry.pr_number,
             pr.mergeable.as_deref().unwrap_or("UNKNOWN")
-        );
+        )));
     }
 
     match pr.merge_state_status.as_deref().unwrap_or("UNKNOWN") {
@@ -6095,23 +6083,25 @@ fn validate_pr_ready_for_merge(
         // With --admin the operator force-pushes trunk past branch protection,
         // so a BLOCKED state is expected and allowed.
         "BLOCKED" if admin => {}
-        "QUEUED" => bail!(
-            "PR #{} is in a merge queue; this workflow only supports direct squash merge",
+        "QUEUED" => bail!(CliError::new(format!(
+            "PR #{} is in a merge queue",
             entry.pr_number
-        ),
-        "HAS_HOOKS" => bail!(
-            "PR #{} is waiting on pending deployments or repository hooks; direct squash merge is not safe",
+        ))
+        .resolution("this workflow only supports direct squash merge")),
+        "HAS_HOOKS" => bail!(CliError::new(format!(
+            "PR #{} is waiting on pending deployments or repository hooks",
             entry.pr_number
-        ),
-        "BLOCKED" => bail!(
-            "PR #{} is blocked by branch protection or an admin-only merge path; direct squash merge is not supported",
+        ))
+        .resolution("direct squash merge is not safe")),
+        "BLOCKED" => bail!(CliError::new(format!(
+            "PR #{} is blocked by branch protection or an admin-only merge path",
             entry.pr_number
-        ),
-        status => bail!(
-            "PR #{} cannot be directly squash merged; mergeStateStatus is `{}`",
-            entry.pr_number,
-            status
-        ),
+        ))
+        .resolution("direct squash merge is not supported")),
+        status => bail!(CliError::new(format!(
+            "PR #{} cannot be directly squash merged (mergeStateStatus is `{}`)",
+            entry.pr_number, status
+        ))),
     }
 
     // --admin bypasses required status checks via branch protection, so skip the
@@ -6429,47 +6419,45 @@ fn validate_sync_frozen_pr_stack(
         return Ok(false);
     }
     if merged_count > 0 {
-        bail!(
-            "partially merged frozen dependency stack is not recoverable automatically yet: {merged_count}/{} dependencies are merged",
+        bail!(CliError::new(format!(
+            "partially merged frozen dependency stack: {merged_count}/{} dependencies are merged",
             prs.len()
-        );
+        ))
+        .reason("automatic recovery is not supported yet"));
     }
 
     for (index, (dependency, pr)) in dependencies.iter().zip(prs).enumerate() {
         validate_sync_frozen_pr_metadata(config, github, dependency, pr)?;
         if index == 0 {
             if pr.base_ref_name != config.trunk {
-                bail!(
+                bail!(CliError::new(format!(
                     "unexpected retarget for frozen dependency `{}` PR #{}: base branch is `{}`, expected trunk `{}`",
-                    dependency.bookmark.name,
-                    pr.number,
-                    pr.base_ref_name,
-                    config.trunk
-                );
+                    dependency.bookmark.name, pr.number, pr.base_ref_name, config.trunk
+                )));
             }
             continue;
         }
 
         let previous = &prs[index - 1];
         if pr.base_ref_name != previous.head_ref_name {
-            bail!(
+            bail!(CliError::new(format!(
                 "unexpected retarget for frozen dependency `{}` PR #{}: base branch is `{}`, expected previous frozen PR #{} head branch `{}`",
                 dependency.bookmark.name,
                 pr.number,
                 pr.base_ref_name,
                 previous.number,
                 previous.head_ref_name
-            );
+            )));
         }
         if pr.base_ref_oid != previous.head_ref_oid {
-            bail!(
+            bail!(CliError::new(format!(
                 "unexpected retarget for frozen dependency `{}` PR #{}: base SHA is {}, expected previous frozen PR #{} head SHA {}",
                 dependency.bookmark.name,
                 pr.number,
-                pr.base_ref_oid,
+                short_commit_id(&pr.base_ref_oid),
                 previous.number,
-                previous.head_ref_oid
-            );
+                short_commit_id(&previous.head_ref_oid)
+            )));
         }
     }
 
@@ -6485,39 +6473,33 @@ fn validate_sync_frozen_pr_metadata(
 ) -> Result<()> {
     validate_get_pr_metadata(github, pr)?;
     if pr.state.eq_ignore_ascii_case("CLOSED") {
-        bail!(
-            "closed-unmerged frozen dependency `{}` points to PR #{}; sync cannot recover a closed PR that was not merged",
-            dependency.bookmark.name,
-            pr.number
-        );
+        bail!(CliError::new(format!(
+            "closed-unmerged frozen dependency `{}` points to PR #{}",
+            dependency.bookmark.name, pr.number
+        ))
+        .reason("sync cannot recover a closed PR that was not merged"));
     }
     if !pr.state.eq_ignore_ascii_case("OPEN") {
-        bail!(
-            "frozen dependency `{}` points to PR #{} but the PR state is `{}`; expected OPEN",
-            dependency.bookmark.name,
-            pr.number,
-            pr.state
-        );
+        bail!(CliError::new(format!(
+            "frozen dependency `{}` PR #{} is `{}`, expected OPEN",
+            dependency.bookmark.name, pr.number, pr.state
+        )));
     }
 
     let head_repo = get_pr_repo(pr, "head")?;
     let base_repo = get_pr_repo(pr, "base")?;
     if head_repo.name_with_owner != github.repo {
-        bail!(
-            "frozen dependency `{}` PR #{} is fork-backed from `{}`; sync only supports same-repo frozen dependencies",
-            dependency.bookmark.name,
-            pr.number,
-            head_repo.name_with_owner
-        );
+        bail!(CliError::new(format!(
+            "frozen dependency `{}` PR #{} is fork-backed from `{}`",
+            dependency.bookmark.name, pr.number, head_repo.name_with_owner
+        ))
+        .resolution("sync only supports same-repo frozen dependencies"));
     }
     if base_repo.name_with_owner != github.repo {
-        bail!(
-            "frozen dependency `{}` PR #{} has base repo `{}`; expected `{}`",
-            dependency.bookmark.name,
-            pr.number,
-            base_repo.name_with_owner,
-            github.repo
-        );
+        bail!(CliError::new(format!(
+            "frozen dependency `{}` PR #{} has base repo `{}`, expected `{}`",
+            dependency.bookmark.name, pr.number, base_repo.name_with_owner, github.repo
+        )));
     }
 
     Ok(())
@@ -6600,13 +6582,14 @@ fn move_trunk_to_remote(
     // a stale git ref.
     let remote_jj = jj_trunk_remote_commit(runner, config)?;
     if remote_jj != remote {
-        bail!(
-            "remote trunk views disagree: git `{}` is {} but jj `{}` is {}; the colocated git ref is stale. Run `jj git export` (or verify {CONFIG_PREFIX}.remote) before moving trunk.",
+        bail!(CliError::new(format!(
+            "remote trunk views disagree: git `{}` is {}, jj `{}` is {}",
             remote_git_ref,
-            remote,
+            short_commit_id(&remote),
             remote_jj_ref(config),
-            remote_jj
-        );
+            short_commit_id(&remote_jj)
+        ))
+        .resolution(format!("run `jj git export` (or verify {CONFIG_PREFIX}.remote)")));
     }
 
     if local == remote {
@@ -6657,13 +6640,13 @@ fn ensure_trunk_can_fast_forward(
     let args = ["merge-base", "--is-ancestor", local, remote];
     let output = git_run(runner, &args)?;
     if !output.success {
-        bail!(
+        bail!(CliError::new(format!(
             "trunk `{}` cannot fast-forward to `{}`: local commit {}, remote commit {}",
             config.trunk,
             remote_ref,
-            local,
-            remote
-        );
+            short_commit_id(local),
+            short_commit_id(remote)
+        )));
     }
 
     Ok(())
@@ -6855,9 +6838,8 @@ fn frozen_bookmarks(runner: &impl CommandRunner) -> Result<Vec<FrozenBookmark>> 
             .parse::<u64>()
             .with_context(|| format!("parse frozen bookmark `{name}` PR number"))?;
         if fields[1] == "conflicted" {
-            bail!(
-                "frozen bookmark `{name}` is conflicted; resolve the bookmark conflict before continuing"
-            );
+            bail!(CliError::new(format!("frozen bookmark `{name}` is conflicted"))
+                .resolution("resolve the bookmark conflict before continuing"));
         }
         let commit_id = fields[2].trim();
         if commit_id.is_empty() {
@@ -6900,19 +6882,19 @@ fn resolve_purely_frozen_stack(
     frozen_bookmarks: Vec<FrozenBookmark>,
 ) -> Result<StackResolution> {
     if frozen_bookmarks.is_empty() {
-        bail!(
-            "unsupported stack shape: empty owned stack and no frozen bookmarks in scope. Run `forklift get <pr>` first or move to a mutable stack."
-        );
+        bail!(CliError::new("empty owned stack and no frozen bookmarks in scope")
+            .resolution("run `forklift get <pr>` first, or move to a mutable stack"));
     }
     let at_commit =
         resolve_single_rev(runner, "@").context("resolve current revision for frozen sync")?;
     let frozen_changes = resolve_frozen_changes(runner, frozen_bookmarks)?;
     let Some(frozen_dependencies) = frozen_dependency_chain_ending_at(&frozen_changes, &at_commit)?
     else {
-        bail!(
-            "unsupported stack shape: empty owned stack and current revision {} is not a `forklift/frozen/pr-*` bookmark target. Run `forklift get <pr>` first or move to a mutable stack.",
-            at_commit
-        );
+        bail!(CliError::new(format!(
+            "empty owned stack and current revision {} is not a `forklift/frozen/pr-*` bookmark target",
+            short_commit_id(&at_commit)
+        ))
+        .resolution("run `forklift get <pr>` first, or move to a mutable stack"));
     };
 
     Ok(StackResolution {
@@ -6931,27 +6913,27 @@ fn resolve_frozen_changes(
         let changes = resolve_stack(runner, &bookmark.commit_id)
             .with_context(|| format!("resolve frozen bookmark `{}`", bookmark.name))?;
         let [change] = changes.as_slice() else {
-            bail!(
-                "frozen bookmark `{}` resolved to {} changes; expected exactly one",
+            bail!(CliError::new(format!(
+                "frozen bookmark `{}` resolved to {} changes, expected one",
                 bookmark.name,
                 changes.len()
-            );
+            )));
         };
         if change.commit_id != bookmark.commit_id {
-            bail!(
+            bail!(CliError::new(format!(
                 "frozen bookmark `{}` points at {}, but jj resolved {}",
                 bookmark.name,
-                bookmark.commit_id,
-                change.commit_id
-            );
+                short_commit_id(&bookmark.commit_id),
+                short_commit_id(&change.commit_id)
+            )));
         }
         if change.conflict {
-            bail!(
+            bail!(CliError::new(format!(
                 "frozen bookmark `{}` points at conflicted change {} ({})",
                 bookmark.name,
-                change.change_id,
-                change.commit_id
-            );
+                short_change_id(&change.change_id),
+                short_commit_id(&change.commit_id)
+            )));
         }
         dependencies.push(FrozenDependency {
             bookmark,
@@ -6969,12 +6951,12 @@ fn frozen_dependency_chain_ending_at(
     let mut by_commit: HashMap<&str, &FrozenDependency> = HashMap::new();
     for dependency in frozen {
         if let Some(existing) = by_commit.insert(&dependency.change.commit_id, dependency) {
-            bail!(
+            bail!(CliError::new(format!(
                 "multiple frozen bookmarks point at commit {}: `{}` and `{}`",
-                dependency.change.commit_id,
+                short_commit_id(&dependency.change.commit_id),
                 existing.bookmark.name,
                 dependency.bookmark.name
-            );
+            )));
         }
     }
 
@@ -6985,10 +6967,10 @@ fn frozen_dependency_chain_ending_at(
     let mut top_down = Vec::new();
     loop {
         if !seen.insert(current.change.commit_id.as_str()) {
-            bail!(
-                "unsupported frozen dependency graph: cycle at bookmark `{}`",
+            bail!(CliError::new(format!(
+                "frozen dependency graph has a cycle at bookmark `{}`",
                 current.bookmark.name
-            );
+            )));
         }
         top_down.push(current);
         let frozen_parents = current
@@ -7000,11 +6982,11 @@ fn frozen_dependency_chain_ending_at(
         match frozen_parents.as_slice() {
             [] => break,
             [parent] => current = *parent,
-            parents => bail!(
-                "unsupported frozen dependency graph: bookmark `{}` has {} frozen parents; expected a linear frozen chain",
+            parents => bail!(CliError::new(format!(
+                "frozen bookmark `{}` has {} frozen parents, expected a linear chain",
                 current.bookmark.name,
                 parents.len()
-            ),
+            ))),
         }
     }
 
@@ -7023,12 +7005,12 @@ fn frozen_dependencies_below_owned(
     let mut by_commit: HashMap<&str, &FrozenDependency> = HashMap::new();
     for dependency in &frozen {
         if let Some(existing) = by_commit.insert(&dependency.change.commit_id, dependency) {
-            bail!(
+            bail!(CliError::new(format!(
                 "multiple frozen bookmarks point at commit {}: `{}` and `{}`",
-                dependency.change.commit_id,
+                short_commit_id(&dependency.change.commit_id),
                 existing.bookmark.name,
                 dependency.bookmark.name
-            );
+            )));
         }
     }
 
@@ -7046,10 +7028,9 @@ fn frozen_dependencies_below_owned(
             .map(|change| change_label(change))
             .collect::<Vec<_>>()
             .join(", ");
-        bail!(
-            "unsupported stack shape: multiple roots selected ({} roots): {root_labels}. Move to a single linear stack before running forklift.",
-            roots.len(),
-        );
+        bail!(CliError::new(format!("stack has multiple roots ({})", roots.len()))
+            .reason(root_labels.clone())
+            .resolution("move to a single linear stack"));
     };
 
     let nearest = root
@@ -7072,11 +7053,13 @@ fn frozen_dependencies_below_owned(
             })
             .collect::<Vec<_>>()
             .join(", ");
-        bail!(
-            "unsupported stack shape: multiple frozen boundaries below owned root {} ({} boundaries): {boundary_labels}. Run `forklift sync` from a single linear stack.",
-            root.change_id,
+        bail!(CliError::new(format!(
+            "multiple frozen boundaries below owned root {} ({})",
+            short_change_id(&root.change_id),
             nearest.len()
-        );
+        ))
+        .reason(boundary_labels.clone())
+        .resolution("run `forklift sync` from a single linear stack"));
     };
 
     let mut seen = HashSet::new();
@@ -7084,10 +7067,10 @@ fn frozen_dependencies_below_owned(
     let mut current = *nearest;
     loop {
         if !seen.insert(current.change.commit_id.as_str()) {
-            bail!(
-                "unsupported frozen dependency graph: cycle at bookmark `{}`",
+            bail!(CliError::new(format!(
+                "frozen dependency graph has a cycle at bookmark `{}`",
                 current.bookmark.name
-            );
+            )));
         }
         top_down.push(current);
 
@@ -7112,11 +7095,12 @@ fn frozen_dependencies_below_owned(
                     })
                     .collect::<Vec<_>>()
                     .join(", ");
-                bail!(
-                    "unsupported frozen dependency graph: bookmark `{}` has {} frozen parents: {parent_labels}; expected a linear frozen chain",
+                bail!(CliError::new(format!(
+                    "frozen bookmark `{}` has {} frozen parents, expected a linear chain",
                     current.bookmark.name,
                     parents.len()
-                )
+                ))
+                .reason(parent_labels.clone()))
             }
         }
     }
@@ -7138,29 +7122,29 @@ fn validate_submit_bookmark_state(
         )
     })?;
     if local_target != change.commit_id {
-        bail!(
-            "local head bookmark `{}` points at {}, but selected change {} is {}; refusing to submit the wrong revision",
+        bail!(CliError::new(format!(
+            "local head bookmark `{}` points at {}, but selected change {} is {}",
             entry.head_branch,
-            local_target,
-            change.change_id,
-            change.commit_id
-        );
+            short_commit_id(&local_target),
+            short_change_id(&change.change_id),
+            short_commit_id(&change.commit_id)
+        )));
     }
 
     let remote = remote_bookmark_status(runner, config, &entry.head_branch)?;
     if !remote.tracked {
-        bail!(
-            "remote bookmark `{}@{}` is untracked; refusing to submit until jj tracks the PR branch",
-            entry.head_branch,
-            config.remote
-        );
+        bail!(CliError::new(format!(
+            "remote bookmark `{}@{}` is untracked",
+            entry.head_branch, config.remote
+        ))
+        .resolution("track the PR branch in jj before submitting"));
     }
     if remote.conflicted {
-        bail!(
-            "bookmark `{}` is conflicted with remote `{}`; resolve the jj bookmark conflict before submitting",
-            entry.head_branch,
-            config.remote
-        );
+        bail!(CliError::new(format!(
+            "bookmark `{}` is conflicted with remote `{}`",
+            entry.head_branch, config.remote
+        ))
+        .resolution("resolve the jj bookmark conflict before submitting"));
     }
 
     Ok(())
@@ -7272,11 +7256,14 @@ fn resolve_submit_head_branch(
     }
 
     if let Some(remote_head) = &expected_remote_head {
-        bail!(
-            "remote branch `{}` already exists at {} but local forklift cache does not identify a safe matching PR; refusing to push over it. Run `forklift get` for the PR that owns it, delete the branch, or choose a different change title.",
+        bail!(CliError::new(format!(
+            "remote branch `{}` already exists at {} with no matching PR in the cache",
             head_branch,
-            remote_head
-        );
+            short_commit_id(remote_head)
+        ))
+        .resolution(
+            "run `forklift get` for the PR that owns it, delete the branch, or choose a different change title"
+        ));
     }
 
     used_head_branches.insert(head_branch.clone());
@@ -7335,17 +7322,19 @@ fn discover_existing_pr_from_local_bookmarks(
                 expected_remote_head,
             )))
         }
-        _ => bail!(
-            "multiple local `{}` bookmarks at {} have open GitHub PRs for {}; refusing to choose: {}",
+        _ => bail!(CliError::new(format!(
+            "multiple local `{}` bookmarks at {} have open GitHub PRs for {}",
             config.branch_prefix,
-            change.commit_id,
-            change.change_id,
+            short_commit_id(&change.commit_id),
+            short_change_id(&change.change_id)
+        ))
+        .reason(
             matches
                 .iter()
                 .map(|(branch, pr)| format!("{} -> PR #{}", branch, pr.pr_number))
                 .collect::<Vec<_>>()
                 .join(", ")
-        ),
+        )),
     }
 }
 
@@ -7661,30 +7650,30 @@ fn validate_submit_frozen_dependency_pr(
 ) -> Result<()> {
     validate_get_pr_metadata(github, pr)?;
     if !pr.state.eq_ignore_ascii_case("OPEN") {
-        bail!(
-            "frozen dependency `{}` points to PR #{}, but GitHub reports state {}; run `forklift sync` before submitting",
-            dependency.bookmark.name,
-            pr.number,
-            pr.state
-        );
+        bail!(CliError::new(format!(
+            "frozen dependency `{}` points to PR #{}, but GitHub reports state {}",
+            dependency.bookmark.name, pr.number, pr.state
+        ))
+        .resolution("run `forklift sync` before submitting"));
     }
     let head_repo = get_pr_repo(pr, "head")?;
     let base_repo = get_pr_repo(pr, "base")?;
     if head_repo.name_with_owner != github.repo || base_repo.name_with_owner != github.repo {
-        bail!(
-            "frozen dependency `{}` PR #{} must be same-repo before submit; run `forklift sync` or unfreeze manually",
-            dependency.bookmark.name,
-            pr.number
-        );
+        bail!(CliError::new(format!(
+            "frozen dependency `{}` PR #{} must be same-repo before submit",
+            dependency.bookmark.name, pr.number
+        ))
+        .resolution("run `forklift sync`, or unfreeze manually"));
     }
     if pr.head_ref_oid != dependency.change.commit_id {
-        bail!(
-            "frozen dependency `{}` points at {}, but GitHub PR #{} head is {}; run `forklift sync` before submitting",
+        bail!(CliError::new(format!(
+            "frozen dependency `{}` points at {}, but GitHub PR #{} head is {}",
             dependency.bookmark.name,
-            dependency.change.commit_id,
+            short_commit_id(&dependency.change.commit_id),
             pr.number,
-            pr.head_ref_oid
-        );
+            short_commit_id(&pr.head_ref_oid)
+        ))
+        .resolution("run `forklift sync` before submitting"));
     }
     Ok(())
 }
@@ -7990,26 +7979,26 @@ fn validate_submit_bases(
             root_parent.as_str(),
         ));
     if root_parent != expected_parent {
-        bail!(
+        bail!(CliError::new(format!(
             "submit base validation failed for {} ({}): jj parent is {}, expected base {} at {}",
-            root.change_id,
-            root.commit_id,
-            root_parent,
+            short_change_id(&root.change_id),
+            short_commit_id(&root.commit_id),
+            short_commit_id(root_parent),
             base_label,
-            expected_parent
-        );
+            short_commit_id(expected_parent)
+        )));
     }
     let root_merge_base = merge_base(runner, &root.commit_id, merge_base_target)?;
     if root_merge_base != expected_parent {
-        bail!(
-            "submit base validation failed for {} ({}): merge-base with base `{}` ({}) is {}, but expected {}",
-            root.change_id,
-            root.commit_id,
+        bail!(CliError::new(format!(
+            "submit base validation failed for {} ({}): merge-base with base `{}` ({}) is {}, expected {}",
+            short_change_id(&root.change_id),
+            short_commit_id(&root.commit_id),
             base_label,
-            merge_base_target,
-            root_merge_base,
-            expected_parent
-        );
+            short_commit_id(merge_base_target),
+            short_commit_id(&root_merge_base),
+            short_commit_id(expected_parent)
+        )));
     }
 
     for pair in stack.windows(2) {
@@ -8018,25 +8007,25 @@ fn validate_submit_bases(
         if selected_parent(child, &HashSet::from([parent.commit_id.as_str()]))
             != Some(parent.commit_id.as_str())
         {
-            bail!(
+            bail!(CliError::new(format!(
                 "submit parent validation failed for {} ({}): expected parent commit {} from previous change {}",
-                child.change_id,
-                child.commit_id,
-                parent.commit_id,
-                parent.change_id
-            );
+                short_change_id(&child.change_id),
+                short_commit_id(&child.commit_id),
+                short_commit_id(&parent.commit_id),
+                short_change_id(&parent.change_id)
+            )));
         }
 
         let merge_base = merge_base(runner, &child.commit_id, &parent.commit_id)?;
         if merge_base != parent.commit_id {
-            bail!(
+            bail!(CliError::new(format!(
                 "submit base validation failed for {} ({}): merge-base with parent change {} ({}) is {}",
-                child.change_id,
-                child.commit_id,
-                parent.change_id,
-                parent.commit_id,
-                merge_base
-            );
+                short_change_id(&child.change_id),
+                short_commit_id(&child.commit_id),
+                short_change_id(&parent.change_id),
+                short_commit_id(&parent.commit_id),
+                short_commit_id(&merge_base)
+            )));
         }
     }
 
@@ -8057,20 +8046,15 @@ fn validate_submit_descriptions(stack: &[ResolvedChange]) -> Result<()> {
         return Ok(());
     }
 
-    let list = undescribed
-        .iter()
-        .map(|change| format!("{} ({})", change.change_id, change.commit_id))
-        .collect::<Vec<_>>()
-        .join(", ");
     let revs = undescribed
         .iter()
-        .map(|change| change.change_id.as_str())
+        .map(|change| short_change_id(&change.change_id))
         .collect::<Vec<_>>()
         .join(" ");
-    bail!(
-        "cannot submit: {} change(s) have no description and jj refuses to push undescribed commits: {list}. Describe them first, e.g. `jj describe -r {revs}`.",
-        undescribed.len()
-    );
+    let count = undescribed.len();
+    let noun = if count == 1 { "change has" } else { "changes have" };
+    bail!(CliError::new(format!("{count} {noun} no description"))
+        .resolution(format!("run `jj describe -r {revs}`")));
 }
 
 #[tracing::instrument(level = "trace", skip_all, fields(left = %left, right = %right))]
@@ -8111,10 +8095,10 @@ fn remote_head_oid(
                 .with_context(|| format!("parse remote head `{branch}` from ls-remote output"))?;
             Ok(Some(oid.to_owned()))
         }
-        _ => bail!(
-            "remote head lookup for `{branch}` returned {} refs; refusing to push ambiguously",
+        _ => bail!(CliError::new(format!(
+            "remote head lookup for `{branch}` returned {} refs, expected one",
             lines.len()
-        ),
+        ))),
     }
 }
 
@@ -8536,36 +8520,36 @@ fn lookup_cached_pr(
     entry: &PrCacheEntry,
 ) -> Result<PrCacheEntry> {
     if entry.head_branch != head_branch {
-        bail!(
-            "conflicting cached PR for {}/{}: cache records head branch `{}` but deterministic head branch is `{}`; refusing to create a duplicate PR",
+        bail!(CliError::new(format!(
+            "conflicting cached PR for {}/{}: cache records head branch `{}`, deterministic head branch is `{}`",
             github.repo,
-            change_id,
+            short_change_id(change_id),
             entry.head_branch,
             head_branch
-        );
+        )));
     }
 
     let pr = fetch_pr_by_number(runner, github, change_id, entry.pr_number)?;
     if !pr.state.eq_ignore_ascii_case("OPEN") {
-        bail!(
-            "closed cached PR for {}/{}: cache points to {} PR #{} on `{}`; refusing to create a duplicate PR",
+        bail!(CliError::new(format!(
+            "closed cached PR for {}/{}: cache points to {} PR #{} on `{}`",
             github.repo,
-            change_id,
+            short_change_id(change_id),
             pr.state,
             entry.pr_number,
             head_branch
-        );
+        )));
     }
 
     if pr.head_ref_name != entry.head_branch {
-        bail!(
-            "conflicting cached PR for {}/{}: cache points to PR #{} but GitHub reports head branch `{}` instead of `{}`",
+        bail!(CliError::new(format!(
+            "conflicting cached PR for {}/{}: cache points to PR #{} but GitHub reports head branch `{}`, expected `{}`",
             github.repo,
-            change_id,
+            short_change_id(change_id),
             entry.pr_number,
             pr.head_ref_name,
             entry.head_branch
-        );
+        )));
     }
     validate_cached_pr_metadata(github, change_id, entry, &pr)?;
 
@@ -8591,13 +8575,16 @@ fn validate_cached_pr_metadata(
         ("author_login", entry.author_login.as_str()),
     ];
     if let Some((field, _)) = required.iter().find(|(_, value)| value.trim().is_empty()) {
-        bail!(
-            "unsupported PR state for {}/{}: missing required metadata field `{}`; run `forklift get {}` or recreate the PR branch with forklift",
+        bail!(CliError::new(format!(
+            "PR for {}/{} is missing required metadata field `{}`",
             github.repo,
-            change_id,
-            field,
+            short_change_id(change_id),
+            field
+        ))
+        .resolution(format!(
+            "run `forklift get {}`, or recreate the PR branch with forklift",
             github_pr_url(&github.repo, entry.pr_number)
-        );
+        )));
     }
 
     for (field, stored, live_value) in [
@@ -8650,15 +8637,15 @@ fn validate_cached_pr_metadata(
         ),
     ] {
         if stored != live_value {
-            bail!(
-                "GitHub PR metadata mismatch for {}/{} PR #{} field `{}`: cache has `{}`, GitHub has `{}`; refusing to update remote branch",
+            bail!(CliError::new(format!(
+                "GitHub PR metadata mismatch for {}/{} PR #{} field `{}`: cache has `{}`, GitHub has `{}`",
                 github.repo,
-                change_id,
+                short_change_id(change_id),
                 entry.pr_number,
                 field,
                 stored,
                 live_value
-            );
+            )));
         }
     }
 
@@ -8677,13 +8664,13 @@ fn fetch_pr_by_number(
     let args = ["api", endpoint.as_str(), "--jq", PR_API_JQ];
     let output = gh_run(runner, &args)?;
     if !output.success {
-        bail!(
-            "missing cached PR for {}/{}: cache points to PR #{} but gh could not load it: {}; refusing to create a duplicate PR",
+        bail!(CliError::new(format!(
+            "missing cached PR for {}/{}: cache points to PR #{} but gh could not load it",
             github.repo,
-            change_id,
-            pr_number_string,
-            output.stderr.trim()
-        );
+            short_change_id(change_id),
+            pr_number_string
+        ))
+        .reason(output.stderr.trim().to_owned()));
     }
 
     serde_json::from_str(&output.stdout)
@@ -8726,25 +8713,25 @@ fn lookup_open_pr_by_head_branch(
         [] => Ok(None),
         [pr] => {
             if !pr.state.eq_ignore_ascii_case("OPEN") {
-                bail!(
+                bail!(CliError::new(format!(
                     "conflicting PR lookup for {}/{}: branch `{}` returned {} PR #{} despite open-state lookup",
                     github.repo,
-                    change_id,
+                    short_change_id(change_id),
                     head_branch,
                     pr.state,
                     pr.number
-                );
+                )));
             }
             let comment_id = find_stack_comment_id(runner, github, pr.number, change_id);
             Ok(Some(pr.clone().into_cache_entry(comment_id)))
         }
-        _ => bail!(
-            "conflicting PR lookup for {}/{}: branch `{}` matched {} open PRs; refusing to choose one",
+        _ => bail!(CliError::new(format!(
+            "conflicting PR lookup for {}/{}: branch `{}` matched {} open PRs",
             github.repo,
-            change_id,
+            short_change_id(change_id),
             head_branch,
             prs.len()
-        ),
+        ))),
     }
 }
 
@@ -8952,40 +8939,43 @@ fn resolve_tree_id(runner: &impl CommandRunner, commit_id: &str) -> Result<Strin
 
 #[tracing::instrument(level = "trace", skip_all)]
 fn change_label(change: &ResolvedChange) -> String {
-    format!("{} ({})", change.change_id, change.commit_id)
+    format!(
+        "{} ({})",
+        short_change_id(&change.change_id),
+        short_commit_id(&change.commit_id)
+    )
 }
 
 #[tracing::instrument(skip_all, fields(revset = %revset))]
 fn validate_stack_shape(stack: &[ResolvedChange], revset: &str) -> Result<()> {
     if stack.is_empty() {
-        bail!(
-            "unsupported stack shape: empty stack selected by `{revset}`. Move to a non-empty owned stack before running forklift."
-        );
+        bail!(CliError::new(format!("empty stack selected by `{revset}`"))
+            .resolution("move to a non-empty owned stack"));
     }
 
     if let Some(change) = stack.iter().find(|change| change.empty) {
-        bail!(
-            "unsupported stack shape: empty change {} ({}) selected. Amend or abandon the empty change before running forklift.",
-            change.change_id,
-            change.commit_id
-        );
+        bail!(CliError::new(format!(
+            "empty change {} selected",
+            change_label(change)
+        ))
+        .resolution("amend or abandon the empty change"));
     }
 
     if let Some(change) = stack.iter().find(|change| change.conflict) {
-        bail!(
-            "unsupported stack shape: conflicted change {} ({}) selected. Resolve conflicts before running forklift.",
-            change.change_id,
-            change.commit_id
-        );
+        bail!(CliError::new(format!(
+            "conflicted change {} selected",
+            change_label(change)
+        ))
+        .resolution("resolve conflicts"));
     }
 
     if let Some(change) = stack.iter().find(|change| change.parent_ids.len() > 1) {
-        bail!(
-            "unsupported stack shape: merge commit {} ({}) has {} parents. Forklift requires a linear owned stack.",
-            change.change_id,
-            change.commit_id,
+        bail!(CliError::new(format!(
+            "merge commit {} has {} parents",
+            change_label(change),
             change.parent_ids.len()
-        );
+        ))
+        .resolution("forklift requires a linear owned stack"));
     }
 
     let selected_commits = stack
@@ -9003,10 +8993,9 @@ fn validate_stack_shape(stack: &[ResolvedChange], revset: &str) -> Result<()> {
             .map(|change| change_label(change))
             .collect::<Vec<_>>()
             .join(", ");
-        bail!(
-            "unsupported stack shape: multiple roots selected ({} roots): {root_labels}. Move to a single linear stack before running forklift.",
-            roots.len()
-        );
+        bail!(CliError::new(format!("stack has multiple roots ({})", roots.len()))
+            .reason(root_labels.clone())
+            .resolution("move to a single linear stack"));
     }
 
     let mut children_by_parent = HashMap::<&str, Vec<&ResolvedChange>>::new();
@@ -9028,10 +9017,13 @@ fn validate_stack_shape(stack: &[ResolvedChange], revset: &str) -> Result<()> {
             .map(|change| change_label(change))
             .collect::<Vec<_>>()
             .join(", ");
-        bail!(
-            "unsupported stack shape: siblings selected under parent {parent_id} ({} children): {child_labels}. Move to one linear branch before running forklift.",
+        bail!(CliError::new(format!(
+            "siblings selected under parent {} ({} children)",
+            short_commit_id(parent_id),
             children.len()
-        );
+        ))
+        .reason(child_labels.clone())
+        .resolution("move to one linear branch"));
     }
 
     Ok(())

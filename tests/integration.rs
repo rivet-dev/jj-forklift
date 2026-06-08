@@ -1026,11 +1026,11 @@ fn sync_divergence_stops_before_rebase() -> anyhow::Result<()> {
     assert!(!output.status.success(), "divergent sync should fail");
     let stderr = stderr_of(&output);
     assert!(
-        stderr.contains(&divergent.local),
+        stderr.contains(&divergent.local[..8]),
         "stderr should cite local trunk:\n{stderr}"
     );
     assert!(
-        stderr.contains(&divergent.remote),
+        stderr.contains(&divergent.remote[..8]),
         "stderr should cite divergent remote trunk:\n{stderr}"
     );
     // The change was not rebased.
