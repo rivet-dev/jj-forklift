@@ -707,6 +707,43 @@ fn merge_rewritten_local_change_points_to_submit() -> anyhow::Result<()> {
 }
 
 #[test]
+fn merge_unsubmitted_child_explains_local_only_change() -> anyhow::Result<()> {
+    let repo = TestRepo::new("merge-unsubmitted-child")?;
+    repo.init_main()?;
+    let submitted = repo.create_change("submitted", "submitted title", "submitted body")?;
+    let branch = branch_for("submitted-title", &submitted.change_id);
+    repo.seed_pr_number(&branch, 32)?;
+    assert_success("submit", &repo.run(&["submit", "--yes"])?);
+
+    let local_only = repo.create_change("local-only", "local only title", "local only body")?;
+
+    let output = repo.run(&["merge"])?;
+    assert!(
+        !output.status.success(),
+        "merge should fail when the stack has an unsubmitted child"
+    );
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains(&format!(
+            "change {} is still local-only",
+            &local_only.change_id[..8]
+        )),
+        "stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("no tracked stack bookmark or GitHub PR was found for `local only title`"),
+        "stderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("merge can only verify submitted changes")
+            && stderr.contains("Run `forklift submit`"),
+        "stderr:\n{stderr}"
+    );
+    assert_ne!(repo.stored_pr(32)?["state"], json!("MERGED"));
+    Ok(())
+}
+
+#[test]
 fn merge_auto_tracks_untracked_trunk_before_fast_forward() -> anyhow::Result<()> {
     let repo = TestRepo::new("merge-untracked-trunk")?;
     repo.init_main()?;

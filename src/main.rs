@@ -3003,6 +3003,10 @@ fn short_commit_id(commit_id: &str) -> &str {
     commit_id.get(..8).unwrap_or(commit_id)
 }
 
+fn short_change_id(change_id: &str) -> &str {
+    change_id.get(..8).unwrap_or(change_id)
+}
+
 fn confirm_submit_stack(yes: bool, yes_command: &str) -> Result<()> {
     if yes {
         return Ok(());
@@ -5813,9 +5817,9 @@ fn resolve_merge_pr_from_live_bookmarks(
     match matches.as_slice() {
         [(comment_id, pr)] => Ok((pr.clone().into_cache_entry(comment_id.clone()), pr.clone())),
         [] => bail!(
-            "no live tracked PR found for {}/{}; run `forklift submit` before merging so forklift can verify the owned PR",
-            github.repo,
-            change.change_id
+            "change {} is still local-only: no tracked stack bookmark or GitHub PR was found for `{}`. PRs may exist for changes below it, but merge can only verify submitted changes. Run `forklift submit`, confirm the plan, then rerun `forklift merge`.",
+            short_change_id(&change.change_id),
+            change.title
         ),
         _ => bail!(
             "multiple live tracked PRs found for {}/{}; refusing to choose before merge",
