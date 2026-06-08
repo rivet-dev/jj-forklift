@@ -321,6 +321,7 @@ fn phase_label(phase: &str) -> (&'static str, &str) {
         "sync-fetch" => ("Fetching", "trunk"),
         "push-refs" => ("Pushing", "bookmarks"),
         "track-branch" => ("Tracking", "branch"),
+        "track-blockers" => ("Tracking", "immutable blockers"),
         "stack-comments" => ("Updating", "stack comments"),
         "rebase-stack" => ("Rebasing", "stack"),
         "move-trunk" => ("Moving", "trunk"),
@@ -363,6 +364,7 @@ const JJ_REQUIRED_IMMUTABLE_ALIAS_VALUE: &str =
 const JJ_WRAPPED_IMMUTABLE_ALIAS_VALUE: &str =
     "forklift_base_immutable_heads() | forklift_frozen_heads()";
 const BOOKMARK_STATUS_TEMPLATE: &str = "remote ++ \"\\t\" ++ if(tracked, \"tracked\", \"untracked\") ++ \"\\t\" ++ if(conflict, \"conflicted\", \"ok\") ++ \"\\n\"";
+const REMOTE_BOOKMARK_TEMPLATE: &str = "name ++ \"\\t\" ++ remote ++ \"\\t\" ++ if(tracked, \"tracked\", \"untracked\") ++ \"\\t\" ++ if(conflict, \"conflicted\", \"ok\") ++ \"\\t\" ++ if(conflict, \"\", normal_target.commit_id()) ++ \"\\n\"";
 const LOCAL_BOOKMARK_TEMPLATE: &str = "name ++ \"\\t\" ++ remote ++ \"\\n\"";
 const FROZEN_BOOKMARK_TEMPLATE: &str = "name ++ \"\\t\" ++ if(conflict, \"conflicted\", \"ok\") ++ \"\\t\" ++ if(conflict, \"\", normal_target.commit_id()) ++ \"\\n\"";
 const FROZEN_BOOKMARK_PREFIX: &str = "forklift/frozen/pr-";
@@ -2981,17 +2983,29 @@ fn unfreeze_stack(
 
     diagnostics.phase("validate-frozen");
     let frozen_name = frozen_bookmark_name(pr.number);
-    let frozen_target = jj_ref_commit_id(runner, &frozen_name)
-        .map_err(|error| phase_error("validate-frozen", &frozen_name, error))?;
-    if frozen_target != pr.head_ref_oid {
-        bail!(
-            "phase=validate-frozen object={} error=frozen bookmark points at {}, but GitHub PR #{} head is {}; run `forklift sync` first before unfreezing safe-next-command=`forklift sync`",
+    let frozen_bookmark = frozen_bookmarks(runner)
+        .map_err(|error| phase_error("validate-frozen", "frozen bookmarks", error))?
+        .into_iter()
+        .find(|bookmark| bookmark.name == frozen_name);
+    let frozen_present = if let Some(frozen_bookmark) = frozen_bookmark {
+        if frozen_bookmark.commit_id != pr.head_ref_oid {
+            bail!(
+                "phase=validate-frozen object={} error=frozen bookmark points at {}, but GitHub PR #{} head is {}; run `forklift sync` first before unfreezing safe-next-command=`forklift sync`",
+                frozen_name,
+                frozen_bookmark.commit_id,
+                pr.number,
+                pr.head_ref_oid
+            );
+        }
+        true
+    } else {
+        ui_warn!(
+            "frozen bookmark `{}` is missing; continuing adoption from PR #{} head",
             frozen_name,
-            frozen_target,
-            pr.number,
-            pr.head_ref_oid
+            pr.number
         );
-    }
+        false
+    };
 
     diagnostics.phase("fetch-branch");
     fetch_get_branches(runner, config, std::slice::from_ref(&pr), diagnostics)
@@ -3001,13 +3015,25 @@ fn unfreeze_stack(
     track_remote_bookmark(runner, config, &pr.head_ref_name, diagnostics)
         .map_err(|error| phase_error("track-branch", &pr.head_ref_name, error))?;
 
+    diagnostics.phase("track-blockers");
+    track_untracked_remote_bookmark_blockers(
+        runner,
+        config,
+        &pr.head_ref_oid,
+        &pr.head_ref_name,
+        diagnostics,
+    )
+    .map_err(|error| phase_error("track-blockers", format!("PR #{}", pr.number), error))?;
+
     diagnostics.phase("remove-frozen");
-    delete_bookmark(runner, &frozen_name, diagnostics)
-        .map_err(|error| phase_error("remove-frozen", &frozen_name, error))?;
+    if frozen_present {
+        delete_bookmark(runner, &frozen_name, diagnostics)
+            .map_err(|error| phase_error("remove-frozen", &frozen_name, error))?;
+    }
 
     diagnostics.phase("verify-mutable");
     if !diagnostics.dry_run {
-        verify_revision_mutable(runner, &pr.head_ref_oid)
+        verify_unfrozen_revision_mutable(runner, config, &pr.head_ref_oid, pr.number)
             .map_err(|error| phase_error("verify-mutable", &pr.head_ref_oid, error))?;
     }
 
@@ -3162,6 +3188,104 @@ fn delete_bookmark(
     Ok(())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RemoteBookmark {
+    name: String,
+    remote: String,
+    tracked: bool,
+    conflicted: bool,
+    commit_id: String,
+}
+
+#[tracing::instrument(skip_all)]
+fn remote_bookmarks(runner: &impl CommandRunner) -> Result<Vec<RemoteBookmark>> {
+    let args = [
+        "bookmark",
+        "list",
+        "--all-remotes",
+        "-T",
+        REMOTE_BOOKMARK_TEMPLATE,
+    ];
+    let output = runner.run("jj", &args)?;
+    if !output.success {
+        bail!(
+            "failed-command=`{}` error={}",
+            display_command("jj", &args),
+            output.stderr.trim()
+        );
+    }
+
+    let mut bookmarks = Vec::new();
+    for line in output.stdout.lines().filter(|line| !line.trim().is_empty()) {
+        let fields = line.split('\t').collect::<Vec<_>>();
+        if fields.len() != 5 {
+            bail!("parse remote bookmark row `{line}`: expected 5 tab-separated fields");
+        }
+        let remote = fields[1].trim();
+        if remote.is_empty() {
+            continue;
+        }
+        bookmarks.push(RemoteBookmark {
+            name: fields[0].to_owned(),
+            remote: remote.to_owned(),
+            tracked: fields[2] == "tracked",
+            conflicted: fields[3] == "conflicted",
+            commit_id: fields[4].trim().to_owned(),
+        });
+    }
+    Ok(bookmarks)
+}
+
+#[tracing::instrument(skip_all, fields(rev = %rev))]
+fn untracked_remote_bookmark_blockers(
+    runner: &impl CommandRunner,
+    config: &AppConfig,
+    rev: &str,
+    already_tracked_branch: &str,
+) -> Result<Vec<RemoteBookmark>> {
+    let mut blockers = Vec::new();
+    for bookmark in remote_bookmarks(runner)? {
+        if bookmark.remote != config.remote
+            || bookmark.tracked
+            || bookmark.conflicted
+            || bookmark.name == already_tracked_branch
+            || bookmark.commit_id.is_empty()
+        {
+            continue;
+        }
+        if git_commit_is_ancestor(runner, rev, &bookmark.commit_id)? {
+            blockers.push(bookmark);
+        }
+    }
+    blockers.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(blockers)
+}
+
+#[tracing::instrument(skip_all, fields(rev = %rev))]
+fn track_untracked_remote_bookmark_blockers(
+    runner: &impl CommandRunner,
+    config: &AppConfig,
+    rev: &str,
+    already_tracked_branch: &str,
+    diagnostics: Diagnostics,
+) -> Result<()> {
+    let blockers = untracked_remote_bookmark_blockers(runner, config, rev, already_tracked_branch)?;
+    if blockers.is_empty() {
+        return Ok(());
+    }
+
+    for blocker in blockers {
+        ui_warn!(
+            "remote bookmark `{}@{}` keeps the target immutable; tracking it before adoption",
+            blocker.name,
+            blocker.remote
+        );
+        track_remote_bookmark(runner, config, &blocker.name, diagnostics)?;
+    }
+
+    Ok(())
+}
+
 #[tracing::instrument(skip_all, fields(rev = %rev))]
 fn verify_revision_mutable(runner: &impl CommandRunner, rev: &str) -> Result<()> {
     let args = ["log", "--no-graph", "-r", rev, "-T", "immutable"];
@@ -3180,6 +3304,75 @@ fn verify_revision_mutable(runner: &impl CommandRunner, rev: &str) -> Result<()>
     bail!(
         "revision {rev} is still immutable after removing the frozen bookmark; remaining immutable blocker may be another frozen bookmark, tag, trunk, or untracked remote bookmark"
     )
+}
+
+#[tracing::instrument(skip_all, fields(rev = %rev, pr = pr_number))]
+fn verify_unfrozen_revision_mutable(
+    runner: &impl CommandRunner,
+    config: &AppConfig,
+    rev: &str,
+    pr_number: u64,
+) -> Result<()> {
+    match verify_revision_mutable(runner, rev) {
+        Ok(()) => Ok(()),
+        Err(_) => Err(anyhow::Error::new(diagnose_unfrozen_revision_immutable(
+            runner, config, rev, pr_number,
+        )?)),
+    }
+}
+
+#[tracing::instrument(skip_all, fields(rev = %rev, pr = pr_number))]
+fn diagnose_unfrozen_revision_immutable(
+    runner: &impl CommandRunner,
+    config: &AppConfig,
+    rev: &str,
+    pr_number: u64,
+) -> Result<CliError> {
+    if git_commit_is_ancestor(runner, rev, &format!("{}@{}", config.trunk, config.remote))? {
+        return Ok(CliError::new(format!(
+            "cannot unfreeze PR #{pr_number} because it is already reachable from trunk {}",
+            config.trunk
+        ))
+        .reason(format!(
+            "PR #{pr_number} resolves to {rev}, which is already contained in `{}`.",
+            config.trunk
+        ))
+        .resolution(format!(
+            "run `forklift sync` or stop trying to adopt PR #{pr_number}"
+        )));
+    }
+
+    let blockers = untracked_remote_bookmark_blockers(runner, config, rev, "")?;
+    if !blockers.is_empty() {
+        let labels = blockers
+            .iter()
+            .take(8)
+            .map(|bookmark| format!("`{}@{}`", bookmark.name, bookmark.remote))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let suffix = if blockers.len() > 8 {
+            format!(" and {} more", blockers.len() - 8)
+        } else {
+            String::new()
+        };
+        return Ok(CliError::new(format!(
+            "cannot unfreeze PR #{pr_number} because untracked remote bookmarks still make it immutable"
+        ))
+        .reason(format!(
+            "PR #{pr_number} resolves to {rev}, but it is still an ancestor of untracked remote bookmark(s): {labels}{suffix}."
+        ))
+        .resolution("track or delete the listed remote bookmarks, then rerun `forklift unfreeze`"));
+    }
+
+    Ok(CliError::new(format!(
+        "cannot unfreeze PR #{pr_number} because it is still immutable"
+    ))
+    .reason(format!(
+        "PR #{pr_number} resolves to {rev}, but jj still reports that revision as immutable after removing the frozen bookmark."
+    ))
+    .resolution(
+        "inspect `immutable_heads()` for another blocker such as a tag, custom immutable alias, or another frozen namespace",
+    ))
 }
 
 #[tracing::instrument(skip_all)]
