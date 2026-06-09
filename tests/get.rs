@@ -40,6 +40,35 @@ fn get_imports_single_pr_without_stack_comment() -> anyhow::Result<()> {
 }
 
 #[test]
+fn get_resolves_short_local_change_id_prefix() -> anyhow::Result<()> {
+    let repo = TestRepo::new("get-short-prefix")?;
+    repo.init_main()?;
+    let imported = repo.create_change("imported", "imported title", "imported body")?;
+    let branch = branch_for("imported-title", &imported.change_id);
+    repo.set_bookmark(&branch, "@")?;
+    repo.push_bookmark(&branch)?;
+    repo.seed_pr(11, &branch, "main", "imported title", "imported body")?;
+
+    // A 4-char prefix is shorter than the 8 chars encoded in the branch name,
+    // so this can only resolve via jj's native prefix expansion of the
+    // locally checked-out change.
+    let short_prefix: String = imported.change_id.chars().take(4).collect();
+    let output = repo.run(&["get", &short_prefix])?;
+    assert_success(&format!("get {short_prefix}"), &output);
+
+    assert_eq!(
+        repo.bookmark_target("forklift/frozen/pr-11")?,
+        imported.commit_id,
+        "short change-id prefix should resolve to the imported PR"
+    );
+    assert_eq!(
+        repo.cache_entry(&imported.change_id)?["pr_number"],
+        json!(11)
+    );
+    Ok(())
+}
+
+#[test]
 fn get_fetches_stack_from_comment_and_writes_cache() -> anyhow::Result<()> {
     let repo = TestRepo::new("get-stack")?;
     repo.init_main()?;

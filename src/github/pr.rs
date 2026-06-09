@@ -371,13 +371,25 @@ pub(crate) fn lookup_get_target_pr(
         return one_get_target_match(target, "branch", branch_matches, purpose);
     }
 
-    let Some(prefix) = change_prefix_get_target(target) else {
-        bail!(CliError::new(format!(
-            "{purpose} target `{target}` did not match an open PR branch"
-        ))
-        .resolution(
-            "pass a PR number, PR URL, exact branch name, or at least 8 chars of the jj change id"
-        ));
+    // Prefer jj's own prefix resolution: it expands a short, locally
+    // unambiguous change id (e.g. `lt`) to a full id and errors on
+    // ambiguity. Fall back to the literal >=8 char branch-prefix match so
+    // PRs whose change isn't checked out locally still resolve.
+    let prefix = match expand_local_change_id(runner, target) {
+        Some(change_id) => change_id_branch_prefix(&change_id).to_owned(),
+        None => {
+            let Some(prefix) = change_prefix_get_target(target) else {
+                bail!(CliError::new(format!(
+                    "{purpose} target `{target}` did not match an open PR branch"
+                ))
+                .resolution(
+                    "pass a PR number, PR URL, exact branch name, or a jj change id prefix \
+                     (short prefixes work for locally checked-out changes; otherwise use at \
+                     least 8 chars)"
+                ));
+            };
+            prefix
+        }
     };
     let change_matches = prs
         .into_iter()
@@ -437,6 +449,35 @@ pub(crate) fn one_get_target_match(
             bail!("{purpose} target `{target}` matched multiple open PRs by {kind}: {refs}")
         }
     }
+}
+
+/// Expand a partial jj change id to its full change id using jj's native
+/// prefix resolution.
+///
+/// Returns `None` when the target isn't a plausible change id, isn't present
+/// in the local repo, or is ambiguous (jj resolves to zero or many commits).
+/// In every `None` case the caller falls back to literal branch matching.
+#[tracing::instrument(level = "trace", skip_all, fields(target = %target))]
+pub(crate) fn expand_local_change_id(runner: &impl CommandRunner, target: &str) -> Option<String> {
+    if target.is_empty() || !target.chars().all(|ch| ch.is_ascii_alphanumeric()) {
+        return None;
+    }
+    let template = "change_id ++ \"\\n\"";
+    let args = ["log", "--no-graph", "-r", target, "-T", template];
+    let output = runner.run("jj", &args).ok()?;
+    if !output.success {
+        return None;
+    }
+    let mut ids = output
+        .stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty());
+    let first = ids.next()?;
+    if ids.next().is_some() {
+        return None;
+    }
+    Some(first.to_owned())
 }
 
 #[tracing::instrument(level = "trace", skip_all, fields(target = %target))]
