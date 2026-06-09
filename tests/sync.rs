@@ -169,6 +169,38 @@ fn targeted_sync_submit_updates_only_target_stack() -> anyhow::Result<()> {
 }
 
 #[test]
+fn sync_from_empty_child_above_frozen_pr_succeeds() -> anyhow::Result<()> {
+    let repo = TestRepo::new("sync-empty-child-frozen")?;
+    repo.init_main()?;
+    let imported = repo.create_change("imported", "imported title", "imported body")?;
+    let branch = branch_for("imported-title", &imported.change_id);
+    repo.set_bookmark(&branch, &imported.commit_id)?;
+    repo.push_bookmark(&branch)?;
+    repo.seed_pr(11, &branch, "main", "imported title", "imported body")?;
+
+    let get_output = repo.run(&["get", "11"])?;
+    assert_success("get 11", &get_output);
+    assert_eq!(
+        repo.rev_commit_id("@-")?,
+        imported.commit_id,
+        "get should leave @ on an empty child above the frozen PR"
+    );
+
+    let output = repo.run(&["sync"])?;
+    assert_success("sync", &output);
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("Finished sync — 0 roots rebased"),
+        "stderr:\n{stderr}"
+    );
+    assert_eq!(
+        repo.bookmark_target("forklift/frozen/pr-11")?,
+        imported.commit_id
+    );
+    Ok(())
+}
+
+#[test]
 fn sync_divergence_stops_before_rebase() -> anyhow::Result<()> {
     let repo = TestRepo::new("sync-divergence")?;
     repo.init_main()?;

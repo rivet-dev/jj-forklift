@@ -176,19 +176,36 @@ pub(crate) fn resolve_purely_frozen_stack(
     let at_commit =
         resolve_single_rev(runner, "@").context("resolve current revision for frozen sync")?;
     let frozen_changes = resolve_frozen_changes(runner, frozen_bookmarks)?;
-    let Some(frozen_dependencies) = frozen_dependency_chain_ending_at(&frozen_changes, &at_commit)?
-    else {
-        bail!(CliError::new(format!(
-            "empty owned stack and current revision {} is not a `forklift/frozen/pr-*` bookmark target",
-            short_commit_id(&at_commit)
-        ))
-        .resolution("run `forklift get <pr>` first, or move to a mutable stack"));
+    if let Some(frozen_dependencies) =
+        frozen_dependency_chain_ending_at(&frozen_changes, &at_commit)?
+    {
+        return Ok(StackResolution {
+            owned: Vec::new(),
+            frozen_dependencies,
+        });
+    }
+
+    let current = resolve_stack(runner, "@").context("resolve current revision for frozen sync")?;
+    if let [current] = current.as_slice() {
+        if current.empty {
+            if let [parent] = current.parent_ids.as_slice() {
+                if let Some(frozen_dependencies) =
+                    frozen_dependency_chain_ending_at(&frozen_changes, parent)?
+                {
+                    return Ok(StackResolution {
+                        owned: Vec::new(),
+                        frozen_dependencies,
+                    });
+                }
+            }
+        }
     };
 
-    Ok(StackResolution {
-        owned: Vec::new(),
-        frozen_dependencies,
-    })
+    bail!(CliError::new(format!(
+        "empty owned stack and current revision {} is not a `forklift/frozen/pr-*` bookmark target or empty child of one",
+        short_commit_id(&at_commit)
+    ))
+    .resolution("run `forklift get <pr>` first, or move to a mutable stack"));
 }
 
 pub(crate) fn resolve_frozen_changes(
