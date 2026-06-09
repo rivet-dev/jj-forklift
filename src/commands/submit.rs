@@ -48,10 +48,15 @@ pub(crate) fn run(
         );
         return Ok(());
     }
+    let closed_orphans = if summary.closed_orphans > 0 {
+        format!(", {} orphans closed", summary.closed_orphans)
+    } else {
+        String::new()
+    };
     ui_progress(
         "Finished",
         &format!(
-            "submit — {} changes, {} pushed, {} created, {} updated",
+            "submit — {} changes, {} pushed, {} created, {} updated{closed_orphans}",
             context.stack.len(),
             summary.pushed_refs,
             summary.created_prs,

@@ -1,6 +1,21 @@
 use super::super::*;
 use super::*;
 
+/// A `stack/` bookmark that collapsed onto a kept commit during a rebase/squash.
+///
+/// When one change is folded into another, jj strands the absorbed change's
+/// bookmark on the surviving commit, so a single commit ends up carrying two
+/// PR branches. The bookmark whose change-id suffix matches the commit's own
+/// change id stays canonical; the rest become orphans recorded here so submit
+/// can offer to close their now-dangling PRs.
+#[derive(Debug, Clone)]
+pub(crate) struct OrphanedPr {
+    pub(crate) bookmark: String,
+    pub(crate) pr_number: u64,
+    pub(crate) host_change_id: String,
+    pub(crate) host_commit_id: String,
+}
+
 pub(crate) fn validate_submit_bookmark_state(
     runner: &impl CommandRunner,
     config: &AppConfig,
@@ -60,6 +75,7 @@ pub(crate) fn validate_submit_bookmark_state(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn resolve_submit_head_branch(
     runner: &impl CommandRunner,
     config: &AppConfig,
@@ -67,6 +83,7 @@ pub(crate) fn resolve_submit_head_branch(
     store: &CacheStore,
     context: &AppContext,
     change: &ResolvedChange,
+    orphans: &mut Vec<OrphanedPr>,
     diagnostics: Diagnostics,
 ) -> Result<(String, Option<PrCacheEntry>, Option<String>)> {
     if let Some(discovered) = discover_existing_pr_from_local_bookmarks(
@@ -75,6 +92,7 @@ pub(crate) fn resolve_submit_head_branch(
         used_head_branches,
         &context.github,
         change,
+        orphans,
     )? {
         return Ok(discovered);
     }
@@ -152,6 +170,7 @@ pub(crate) fn discover_existing_pr_from_local_bookmarks(
     used_head_branches: &mut HashSet<String>,
     github: &GitHubContext,
     change: &ResolvedChange,
+    orphans: &mut Vec<OrphanedPr>,
 ) -> Result<Option<(String, Option<PrCacheEntry>, Option<String>)>> {
     let mut matches = Vec::new();
     for head_branch in local_stack_bookmarks_for_change(runner, config, change)? {
@@ -177,22 +196,81 @@ pub(crate) fn discover_existing_pr_from_local_bookmarks(
                 expected_remote_head,
             )))
         }
-        _ => bail!(
+        _ => resolve_collapsed_bookmark_matches(
+            runner,
+            config,
+            change,
+            matches,
+            used_head_branches,
+            orphans,
+        ),
+    }
+}
+
+/// Disambiguate several PR-bearing `stack/` bookmarks that collapsed onto one
+/// commit. forklift encodes the owning change id as each bookmark's suffix, so
+/// the bookmark whose suffix matches the commit's own change id is the canonical
+/// owner; the rest are orphans from changes that got absorbed by a rebase/squash.
+/// We proceed with the canonical bookmark and record the orphans for cleanup.
+/// Only when exactly one canonical bookmark can't be identified do we bail.
+fn resolve_collapsed_bookmark_matches(
+    runner: &impl CommandRunner,
+    config: &AppConfig,
+    change: &ResolvedChange,
+    matches: Vec<(String, PrCacheEntry)>,
+    used_head_branches: &mut HashSet<String>,
+    orphans: &mut Vec<OrphanedPr>,
+) -> Result<Option<(String, Option<PrCacheEntry>, Option<String>)>> {
+    let change_prefix = change_id_branch_prefix(&change.change_id);
+    let (mut owned, orphaned): (Vec<_>, Vec<_>) = matches
+        .into_iter()
+        .partition(|(branch, _)| head_branch_matches_change_prefix(branch, change_prefix));
+
+    if owned.len() != 1 {
+        // Zero or several bookmarks claim this change id: genuinely ambiguous,
+        // so refuse rather than guess which PR owns the commit.
+        let reason = owned
+            .iter()
+            .chain(orphaned.iter())
+            .map(|(branch, pr)| format!("{} -> PR #{}", branch, pr.pr_number))
+            .collect::<Vec<_>>()
+            .join(", ");
+        bail!(
             CliError::new(format!(
                 "multiple local `{}` bookmarks at {} have open GitHub PRs for {}",
                 config.branch_prefix,
                 short_commit_id(&change.commit_id),
                 short_change_id(&change.change_id)
             ))
-            .reason(
-                matches
-                    .iter()
-                    .map(|(branch, pr)| format!("{} -> PR #{}", branch, pr.pr_number))
-                    .collect::<Vec<_>>()
-                    .join(", ")
+            .reason(reason)
+            .resolution(
+                "delete the stale bookmarks (or close their PRs) so each stack commit owns exactly one PR branch"
             )
-        ),
+        );
     }
+
+    let (head_branch, existing_pr) = owned.pop().expect("exactly one canonical bookmark");
+    validate_submit_bookmark_state(runner, config, change, &existing_pr)?;
+    let expected_remote_head = remote_head_oid(runner, &config.remote, &head_branch)?;
+    used_head_branches.insert(head_branch.clone());
+
+    for (branch, pr) in orphaned {
+        ui_warn!(
+            "bookmark `{}` (PR #{}) was absorbed into {} ({}); it no longer maps to a distinct commit",
+            branch,
+            pr.pr_number,
+            short_change_id(&change.change_id),
+            short_commit_id(&change.commit_id),
+        );
+        orphans.push(OrphanedPr {
+            bookmark: branch,
+            pr_number: pr.pr_number,
+            host_change_id: change.change_id.clone(),
+            host_commit_id: change.commit_id.clone(),
+        });
+    }
+
+    Ok(Some((head_branch, Some(existing_pr), expected_remote_head)))
 }
 
 #[tracing::instrument(skip_all, fields(change = %change.change_id))]
@@ -269,6 +347,7 @@ pub(crate) fn submit_stack(
     .map_err(|error| phase_error("plan-submit", "frozen dependencies", error))?;
     let mut plans = Vec::new();
     let mut used_head_branches = HashSet::new();
+    let mut orphaned_prs: Vec<OrphanedPr> = Vec::new();
     let mut previous_head_branch = frozen_entries
         .last()
         .map(|(_, entry)| entry.head_branch.clone());
@@ -285,6 +364,7 @@ pub(crate) fn submit_stack(
             &store,
             context,
             change,
+            &mut orphaned_prs,
             diagnostics,
         )
         .map_err(|error| {
@@ -355,6 +435,14 @@ pub(crate) fn submit_stack(
 
     diagnostics.print_submit_plan(config, context, &plans);
     if diagnostics.dry_run {
+        for orphan in &orphaned_prs {
+            diagnostics.plan_line(&format!(
+                "- would offer to close orphaned PR #{} and delete branch {} (absorbed into {})",
+                orphan.pr_number,
+                orphan.bookmark,
+                short_change_id(&orphan.host_change_id)
+            ));
+        }
         diagnostics.plan_line(
             "- live jj/GitHub discovery ran during planning; SQLite cache writes are skipped",
         );
@@ -471,7 +559,119 @@ pub(crate) fn submit_stack(
         ui_finish_progress_bar(progress);
     }
 
+    if !orphaned_prs.is_empty() {
+        summary.closed_orphans =
+            close_orphaned_prs(runner, &context.github, &orphaned_prs, yes, diagnostics)?;
+    }
+
     Ok(summary)
+}
+
+/// Offer to close PRs whose `stack/` bookmarks collapsed onto a kept commit.
+/// Returns the number of PRs actually closed. Closing a PR is destructive and
+/// outward-facing, so it requires explicit consent: `--yes` (or an interactive
+/// `y`) closes them; a bare non-interactive run leaves them open with a hint.
+fn close_orphaned_prs(
+    runner: &impl CommandRunner,
+    github: &GitHubContext,
+    orphans: &[OrphanedPr],
+    yes: bool,
+    diagnostics: Diagnostics,
+) -> Result<usize> {
+    if !confirm_close_orphans(orphans, yes)? {
+        for orphan in orphans {
+            ui_warn!(
+                "left orphaned PR #{} (`{}`) open; close it with `gh pr close {} --delete-branch` when ready",
+                orphan.pr_number,
+                orphan.bookmark,
+                orphan.pr_number,
+            );
+        }
+        return Ok(0);
+    }
+
+    tracing::debug!(phase = "close-orphans", "recovery phase");
+    let progress = diagnostics.progress_bar("Closing", "orphaned PRs", orphans.len());
+    for (index, orphan) in orphans.iter().enumerate() {
+        close_orphaned_pr(runner, github, orphan, diagnostics)?;
+        // The PR's remote branch is gone (gh deleted it); forget the local
+        // bookmark and its remote-tracking ref so jj stops carrying the strand.
+        forget_bookmark_tracking(runner, &orphan.bookmark, diagnostics);
+        if let Some(progress) = &progress {
+            progress.set_position((index + 1) as u64);
+        }
+    }
+    if let Some(progress) = progress {
+        ui_finish_progress_bar(progress);
+    }
+    Ok(orphans.len())
+}
+
+fn close_orphaned_pr(
+    runner: &impl CommandRunner,
+    github: &GitHubContext,
+    orphan: &OrphanedPr,
+    diagnostics: Diagnostics,
+) -> Result<()> {
+    let number = orphan.pr_number.to_string();
+    let args = [
+        "pr",
+        "close",
+        number.as_str(),
+        "--repo",
+        github.repo.as_str(),
+        "--delete-branch",
+    ];
+    diagnostics.command("gh", &args);
+    let output = gh_run(runner, &args)?;
+    if !output.success {
+        bail!(
+            "failed-command=`{}` error={}",
+            display_command("gh", &args),
+            output.stderr.trim()
+        );
+    }
+    ui_progress(
+        "Closed",
+        &format!(
+            "orphaned PR #{} (`{}`) absorbed into {}",
+            orphan.pr_number,
+            orphan.bookmark,
+            short_commit_id(&orphan.host_commit_id)
+        ),
+    );
+    Ok(())
+}
+
+fn confirm_close_orphans(orphans: &[OrphanedPr], yes: bool) -> Result<bool> {
+    ui_warn!(
+        "{} orphaned PR branch(es) collapsed onto a kept commit:",
+        orphans.len()
+    );
+    for orphan in orphans {
+        ui_warn!("- PR #{} `{}`", orphan.pr_number, orphan.bookmark);
+    }
+
+    if yes {
+        return Ok(true);
+    }
+    if !io::stdin().is_terminal() {
+        // Never close GitHub PRs implicitly in a non-interactive run.
+        return Ok(false);
+    }
+
+    eprint!(
+        "Close {} orphaned PR(s) and delete their branches? [y/N] ",
+        orphans.len()
+    );
+    io::stderr()
+        .flush()
+        .context("flush orphan confirmation prompt")?;
+    let mut answer = String::new();
+    io::stdin()
+        .read_line(&mut answer)
+        .context("read orphan confirmation")?;
+    Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "YES" | "Yes"))
 }
 
 pub(crate) fn resolve_submit_frozen_dependency_entries(
@@ -833,7 +1033,10 @@ pub(crate) fn validate_submit_bases(
             dependency.bookmark.name.clone(),
             dependency.change.commit_id.clone(),
         ),
-        None => (config.trunk.clone(), resolve_single_rev(runner, &config.trunk)?),
+        None => (
+            config.trunk.clone(),
+            resolve_single_rev(runner, &config.trunk)?,
+        ),
     };
     // The stack revset excludes empty commits (`~empty()`), so the resolved base
     // can sit one or more empty spacer commits below the stack root (e.g. a

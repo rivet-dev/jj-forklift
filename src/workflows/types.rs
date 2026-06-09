@@ -11,6 +11,7 @@ pub(crate) struct SubmitSummary {
     pub(crate) updated_comments: usize,
     pub(crate) unchanged_comments: usize,
     pub(crate) duplicate_comment_warnings: usize,
+    pub(crate) closed_orphans: usize,
 }
 
 #[derive(Debug, Clone)]

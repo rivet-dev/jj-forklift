@@ -15,6 +15,7 @@ pub(crate) fn status_report(
     let context = resolve_stack_context(runner, revset)?;
     let store = CacheStore::load_current_best_effort(runner, diagnostics, "status")?;
     let mut used_head_branches = HashSet::new();
+    let mut orphaned_prs: Vec<OrphanedPr> = Vec::new();
     let mut previous_head_branch = None;
     let mut owned_prs = Vec::new();
     let mut bookmark_problems = Vec::new();
@@ -46,6 +47,7 @@ pub(crate) fn status_report(
             &store,
             &context,
             change,
+            &mut orphaned_prs,
             diagnostics,
         ) {
             Ok((head_branch, existing_pr, expected_remote_head)) => {
@@ -92,6 +94,17 @@ pub(crate) fn status_report(
                 });
             }
         }
+    }
+
+    for orphan in &orphaned_prs {
+        let note = format!(
+            "orphaned PR #{} (`{}`) collapsed onto {}; close it or `forklift submit` to clean it up",
+            orphan.pr_number,
+            orphan.bookmark,
+            short_change_id(&orphan.host_change_id)
+        );
+        bookmark_problems.push(note.clone());
+        problems.push(note);
     }
 
     if let Some((change, owned)) = context.stack.first().zip(owned_prs.first()) {

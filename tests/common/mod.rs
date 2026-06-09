@@ -912,6 +912,19 @@ if args[:2] == ["pr", "merge"]:
         save_state(state)
     sys.exit(0)
 
+# Close a PR, optionally deleting its remote head branch (`--delete-branch`).
+if args[:2] == ["pr", "close"]:
+    state = load_state()
+    pr = find_pr(state, args[2])
+    if pr is not None:
+        pr["state"] = "CLOSED"
+        save_state(state)
+        if "--delete-branch" in args:
+            subprocess.call(["git", "push", "origin", "--delete",
+                             "refs/heads/" + pr["headRefName"]],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    sys.exit(0)
+
 # GET a single PR: `api repos/owner/repo/pulls/<n>` (no -X).
 if args[:1] == ["api"] and len(args) >= 2 \
         and args[1].startswith("repos/owner/repo/pulls/") and "-X" not in args:

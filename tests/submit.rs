@@ -459,3 +459,82 @@ fn submit_repoints_pr_bookmark_stranded_on_divergent_copy() -> anyhow::Result<()
     assert_eq!(repo.git_remote_branch_target(&branch)?, selected);
     Ok(())
 }
+
+// A rebase/squash can fold one change into another, leaving jj to strand the
+// absorbed change's `stack/` bookmark on the surviving commit. That commit then
+// carries two PR branches. Submit must keep the bookmark whose change-id suffix
+// matches the commit (the canonical owner), submit it, and offer to close the
+// orphaned PR. Reproduced end-to-end with the real `jj squash` + `jj rebase`.
+#[test]
+fn submit_tolerates_collapsed_bookmarks_and_closes_orphan() -> anyhow::Result<()> {
+    let repo = TestRepo::new("collapsed-bookmarks")?;
+    repo.init_main()?;
+    let stack = repo.create_linear_stack(2)?;
+    let canonical = branch_for("change-1-title", &stack[0].change_id);
+    let orphan = branch_for("change-2-title", &stack[1].change_id);
+    repo.seed_pr_number(&canonical, 11)?;
+    repo.seed_pr_number(&orphan, 12)?;
+
+    // First submit opens both PRs and pushes both branches.
+    assert_success("initial submit", &repo.run(&["submit", "--yes"])?);
+    assert_eq!(repo.stored_pr(11)?["state"], json!("OPEN"));
+    assert_eq!(repo.stored_pr(12)?["state"], json!("OPEN"));
+
+    // Fold the top change into the bottom: jj abandons the top and relocates its
+    // bookmark onto the bottom commit, so the bottom now carries both branches.
+    repo.jj(&[
+        "squash",
+        "--from",
+        &stack[1].change_id,
+        "--into",
+        &stack[0].change_id,
+        "--use-destination-message",
+    ])?;
+    assert_eq!(
+        repo.bookmark_target(&orphan)?,
+        repo.bookmark_target(&canonical)?,
+        "squash should strand the orphan bookmark onto the canonical commit"
+    );
+
+    // Advance trunk and rebase the collapsed change onto it — the real `jj rebase`
+    // that surfaces the collision (commit ids change, but both bookmarks follow).
+    repo.jj(&["new", "main", "-m", "advance trunk"])?;
+    repo.write_file("trunk2.txt", "two\n")?;
+    repo.jj(&["describe", "-m", "advance trunk"])?;
+    repo.set_bookmark("main", "@")?;
+    repo.push_bookmark("main")?;
+    repo.jj(&["rebase", "-r", &stack[0].change_id, "-d", "main"])?;
+    repo.jj(&["edit", &stack[0].change_id])?;
+    let collapsed = repo.change_at(&stack[0].change_id)?;
+
+    // Submit again. Without the fix this bails during planning ("multiple local
+    // bookmarks ... have open GitHub PRs"); with it, the canonical PR proceeds
+    // and the orphan is closed (--yes consents to the close).
+    let output = repo.run(&["submit", "--yes"])?;
+    assert_success("submit after collapse", &output);
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("was absorbed into") && stderr.contains(&orphan),
+        "submit should warn that the orphan bookmark was absorbed\nstderr:\n{stderr}"
+    );
+
+    // The canonical PR is still open and re-pushed to the rebased commit.
+    assert_eq!(repo.stored_pr(11)?["state"], json!("OPEN"));
+    assert_eq!(
+        repo.git_remote_branch_target(&canonical)?,
+        collapsed.commit_id
+    );
+    assert_eq!(repo.bookmark_target(&canonical)?, collapsed.commit_id);
+
+    // The orphaned PR was closed and its branch deleted locally and on the remote.
+    assert_eq!(repo.stored_pr(12)?["state"], json!("CLOSED"));
+    assert!(
+        !repo.remote_branch_exists(&orphan)?,
+        "orphan remote branch should be deleted"
+    );
+    assert!(
+        !repo.bookmark_exists(&orphan)?,
+        "orphan local bookmark should be forgotten"
+    );
+    Ok(())
+}
