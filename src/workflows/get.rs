@@ -43,6 +43,14 @@ pub(crate) fn get_stack(
     }
     validate_get_pr_stack(config, &github, target_pr_number, &prs)?;
 
+    diagnostics.phase("get-fetch-trunk");
+    fetch_remote(runner, config, diagnostics)
+        .map_err(|error| phase_error("get-fetch-trunk", &config.remote, error))?;
+    if !diagnostics.dry_run {
+        warn_if_get_trunk_is_behind(runner, config)
+            .map_err(|error| phase_error("get-fetch-trunk", &config.trunk, error))?;
+    }
+
     diagnostics.phase("fetch-stack");
     fetch_get_branches(runner, config, &prs, diagnostics)?;
     let pr_count = prs.len();
@@ -114,6 +122,23 @@ pub(crate) fn get_stack(
         cache_entries: cache_entries,
         edited,
     })
+}
+
+pub(crate) fn warn_if_get_trunk_is_behind(
+    runner: &impl CommandRunner,
+    config: &AppConfig,
+) -> Result<()> {
+    let local = resolve_single_rev(runner, &config.trunk)?;
+    let remote = jj_trunk_remote_commit(runner, config)?;
+    if local != remote && git_commit_is_ancestor(runner, &local, &remote)? {
+        ui_warn!(
+            "local trunk `{}` is behind `{}@{}`; run `forklift sync` before editing or submitting this stack",
+            config.trunk,
+            config.trunk,
+            config.remote
+        );
+    }
+    Ok(())
 }
 
 #[tracing::instrument(skip_all, fields(top = top_frozen))]

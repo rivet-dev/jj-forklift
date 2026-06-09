@@ -40,6 +40,43 @@ fn get_imports_single_pr_without_stack_comment() -> anyhow::Result<()> {
 }
 
 #[test]
+fn get_warns_when_local_trunk_is_behind_remote() -> anyhow::Result<()> {
+    let repo = TestRepo::new("get-stale-trunk")?;
+    let main = repo.init_main()?;
+    let imported = repo.create_change("imported", "imported title", "imported body")?;
+    let branch = branch_for("imported-title", &imported.change_id);
+    repo.set_bookmark(&branch, &imported.commit_id)?;
+    repo.push_bookmark(&branch)?;
+    repo.seed_pr(11, &branch, "main", "imported title", "imported body")?;
+    let advanced = repo.advance_remote_trunk("remote work", &imported.change_id)?;
+    repo.jj(&[
+        "bookmark",
+        "set",
+        "--allow-backwards",
+        "main",
+        "-r",
+        &main.commit_id,
+    ])?;
+
+    let output = repo.run(&["get", "11", "--no-edit"])?;
+    assert_success("get 11 --no-edit", &output);
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains(
+            "local trunk `main` is behind `main@origin`; run `forklift sync` before editing or submitting this stack"
+        ),
+        "stderr:\n{stderr}"
+    );
+    assert_eq!(
+        repo.bookmark_target("main")?,
+        main.commit_id,
+        "get should warn but leave local trunk unmoved"
+    );
+    assert_eq!(repo.git_remote_branch_target("main")?, advanced.commit_id);
+    Ok(())
+}
+
+#[test]
 fn get_resolves_short_local_change_id_prefix() -> anyhow::Result<()> {
     let repo = TestRepo::new("get-short-prefix")?;
     repo.init_main()?;
