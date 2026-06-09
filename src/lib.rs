@@ -1,3 +1,5 @@
+pub mod app;
+
 use serde::Deserialize;
 
 pub fn empty_string_to_none<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>

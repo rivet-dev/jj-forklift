@@ -1,0 +1,24 @@
+use super::super::cli::*;
+use super::super::*;
+
+pub(crate) fn run(
+    runner: &impl CommandRunner,
+    config: &AppConfig,
+    options: StatusOptions,
+    diagnostics: Diagnostics,
+    _verbose: bool,
+    _dry_run: bool,
+) -> Result<()> {
+    let report = status_report(runner, &config, DEFAULT_STACK_REVSET, diagnostics)
+        .map_err(|error| phase_error("status", DEFAULT_STACK_REVSET, error))?;
+    if options.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report).context("serialize status json")?
+        );
+    } else {
+        print_status_report(&report);
+    }
+
+    Ok(())
+}

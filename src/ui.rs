@@ -1,0 +1,173 @@
+use super::*;
+
+/// Global toggle controlling whether the user-facing `ui_*` macros emit ANSI
+/// color escapes. Set once via [`init_ui`]; defaults to colored output.
+static UI_COLOR: OnceLock<bool> = OnceLock::new();
+
+/// Returns whether the user-facing status macros should emit ANSI color.
+///
+/// Defaults to `true` when [`init_ui`] has not been called so that early output
+/// is still styled on terminals.
+pub(super) fn ui_color_enabled() -> bool {
+    *UI_COLOR.get().unwrap_or(&true)
+}
+
+/// Initializes the global color toggle for the `ui_*` status macros.
+///
+/// Pass the desired color setting; callers typically derive it from
+/// `std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none()`.
+pub(super) fn init_ui(color: bool) {
+    let _ = UI_COLOR.set(color);
+}
+
+/// Emits an "info" status line to stdout.
+macro_rules! ui_info {
+    ($($arg:tt)*) => {{
+        let __msg = format!($($arg)*);
+        ui_info_line(&__msg);
+    }};
+}
+
+/// Emits a "warning" status line to stderr.
+macro_rules! ui_warn {
+    ($($arg:tt)*) => {{
+        let __msg = format!($($arg)*);
+        ui_warn_line(&__msg);
+    }};
+}
+
+/// Width of the right-aligned status verb column. Matches cargo's gutter so
+/// output lines up under a familiar `   Compiling ...` shape.
+const PROGRESS_VERB_WIDTH: usize = 12;
+
+/// Emits a cargo-style progress line to stderr: a right-aligned bold-green
+/// verb in a fixed-width gutter, followed by a message. Append-only — never
+/// rewrites or clears lines. Goes to stderr so stdout stays clean for machine
+/// output (`status --json`, follow-up command hints).
+pub(super) fn ui_progress(verb: &str, message: &str) {
+    // Pad the plain verb first, then color, so ANSI escapes don't throw off the
+    // alignment width.
+    let padded = format!("{verb:>width$}", width = PROGRESS_VERB_WIDTH);
+    if ui_color_enabled() {
+        eprintln!("{} {message}", padded.green().bold());
+    } else {
+        eprintln!("{padded} {message}");
+    }
+}
+
+/// Emits a red `error:` line to stderr for a human-readable failure headline.
+#[allow(dead_code)]
+pub(super) fn ui_error(message: &str) {
+    if ui_color_enabled() {
+        eprintln!("{} {message}", "error:".red().bold());
+    } else {
+        eprintln!("error: {message}");
+    }
+}
+
+/// Emits a dimmed `hint:` line suggesting a safe next command.
+#[allow(dead_code)]
+pub(super) fn ui_hint(message: &str) {
+    if ui_color_enabled() {
+        eprintln!("{} {message}", "hint:".cyan().bold());
+    } else {
+        eprintln!("hint: {message}");
+    }
+}
+
+pub(super) fn ui_info_line(message: &str) {
+    let padded = format!("{:>width$}", "Info", width = PROGRESS_VERB_WIDTH);
+    if ui_color_enabled() {
+        println!("{} {message}", padded.cyan().bold());
+    } else {
+        println!("{padded} {message}");
+    }
+}
+
+pub(super) fn ui_warn_line(message: &str) {
+    let padded = format!("{:>width$}", "Warning", width = PROGRESS_VERB_WIDTH);
+    if ui_color_enabled() {
+        eprintln!("{} {message}", padded.yellow().bold());
+    } else {
+        eprintln!("{padded} {message}");
+    }
+}
+
+pub(super) fn ui_conflict(message: &str) {
+    let padded = format!("{:>width$}", "Conflict", width = PROGRESS_VERB_WIDTH);
+    if ui_color_enabled() {
+        eprintln!("{} {message}", padded.red().bold());
+    } else {
+        eprintln!("{padded} {message}");
+    }
+}
+
+pub(super) fn ui_progress_bar(verb: &str, message: &str, total: usize) -> Option<ProgressBar> {
+    if total == 0 || !std::io::stderr().is_terminal() {
+        return None;
+    }
+    let progress = ProgressBar::new(total as u64);
+    progress.set_draw_target(ProgressDrawTarget::stderr_with_hz(10));
+    progress.set_prefix(format!("{verb:>width$}", width = PROGRESS_VERB_WIDTH));
+    progress.set_message(message.to_owned());
+
+    let template = if ui_color_enabled() {
+        "{prefix:.green.bold} {msg} [{bar:18}] {pos}/{len}"
+    } else {
+        "{prefix} {msg} [{bar:18}] {pos}/{len}"
+    };
+    let style = ProgressStyle::with_template(template)
+        .unwrap_or_else(|_| ProgressStyle::default_bar())
+        .progress_chars("=> ");
+    progress.set_style(style);
+    progress.set_position(0);
+    progress.force_draw();
+    Some(progress)
+}
+
+pub(super) fn ui_finish_progress_bar(progress: ProgressBar) {
+    progress.force_draw();
+    progress.finish();
+}
+
+/// Maps an internal recovery-phase id to a cargo-style `(verb, message)` pair
+/// for progress output. The verb is a present participle shown in the gutter;
+/// the message names what is being acted on. Unknown phases fall back to the
+/// raw id so new phases still surface something useful.
+pub(super) fn phase_label(phase: &str) -> (&'static str, &str) {
+    match phase {
+        "resolve-github" => ("Resolving", "GitHub repository"),
+        "resolve-stack" => ("Resolving", "stack"),
+        "resolve-stack-comment" => ("Resolving", "stack comment"),
+        "resolve-prs" => ("Resolving", "pull requests"),
+        "resolve-target" => ("Resolving", "target"),
+        "resolve-fetched-heads" => ("Resolving", "fetched heads"),
+        "plan-submit" => ("Planning", "submit"),
+        "validate-submit-bases" => ("Validating", "submit bases"),
+        "validate-frozen" => ("Validating", "frozen bookmarks"),
+        "verify-mutable" => ("Verifying", "mutable changes"),
+        "verify-merge" => ("Verifying", "merge"),
+        "merge-pr-check" => ("Checking", "merge readiness"),
+        "status-aliases" => ("Checking", "jj aliases"),
+        "fetch-branch" => ("Fetching", "branch"),
+        "fetch-stack" => ("Fetching", "stack"),
+        "sync-fetch" => ("Fetching", "trunk"),
+        "push-refs" => ("Pushing", "bookmarks"),
+        "track-branch" => ("Tracking", "branch"),
+        "track-blockers" => ("Tracking", "immutable blockers"),
+        "stack-comments" => ("Updating", "stack comments"),
+        "rebase-stack" => ("Rebasing", "stack"),
+        "move-trunk" => ("Moving", "trunk"),
+        "merge-push" => ("Merging", "fast-forward push"),
+        "merge-refresh-above" => ("Refreshing", "stack above merge"),
+        "merge-submit" => ("Submitting", "stack"),
+        "freeze-stack" => ("Freezing", "stack bookmarks"),
+        "sync-frozen" => ("Syncing", "frozen bookmarks"),
+        "remove-frozen" => ("Removing", "frozen bookmarks"),
+        "reset-working-copy" => ("Resetting", "working copy"),
+        "sync-submit" => ("Submitting", "stack"),
+        "cleanup-branches" => ("Cleaning", "branches"),
+        "cleanup-merged" => ("Cleaning", "merged branches"),
+        other => ("Running", other),
+    }
+}

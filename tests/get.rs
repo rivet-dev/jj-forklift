@@ -1,0 +1,104 @@
+// End-to-end `get` tests driving the real `forklift` binary against a real colocated jj repo.
+
+mod common;
+
+use common::*;
+use serde_json::json;
+
+#[test]
+fn get_imports_single_pr_without_stack_comment() -> anyhow::Result<()> {
+    let repo = TestRepo::new("get-single")?;
+    repo.init_main()?;
+    let imported = repo.create_change("imported", "imported title", "imported body")?;
+    let branch = branch_for("imported-title", &imported.change_id);
+    repo.set_bookmark(&branch, "@")?;
+    repo.push_bookmark(&branch)?;
+    repo.seed_pr(11, &branch, "main", "imported title", "imported body")?;
+
+    let output = repo.run(&["get", "11"])?;
+    assert_success("get 11", &output);
+
+    assert_eq!(
+        repo.bookmark_target("forklift/frozen/pr-11")?,
+        imported.commit_id,
+        "get should freeze the PR head"
+    );
+    assert!(
+        !repo.bookmark_exists("forklift/frozen/pr-12")?,
+        "single-PR import should not infer descendants"
+    );
+    assert_eq!(
+        repo.rev_commit_id("@-")?,
+        imported.commit_id,
+        "get should leave @ on a new editable change above the imported PR"
+    );
+    assert_eq!(
+        repo.cache_entry(&imported.change_id)?["pr_number"],
+        json!(11)
+    );
+    Ok(())
+}
+
+#[test]
+fn get_fetches_stack_from_comment_and_writes_cache() -> anyhow::Result<()> {
+    let repo = TestRepo::new("get-stack")?;
+    repo.init_main()?;
+    let stack = repo.create_linear_stack(2)?;
+    let bottom = branch_for("change-1-title", &stack[0].change_id);
+    let top = branch_for("change-2-title", &stack[1].change_id);
+    repo.set_bookmark(&bottom, &stack[0].commit_id)?;
+    repo.set_bookmark(&top, &stack[1].commit_id)?;
+    repo.push_bookmark(&bottom)?;
+    repo.push_bookmark(&top)?;
+    repo.seed_pr(11, &bottom, "main", "change 1 title", "change 1 body")?;
+    repo.seed_pr(12, &top, &bottom, "change 2 title", "change 2 body")?;
+    let rows = [
+        (
+            stack[0].change_id.as_str(),
+            11u64,
+            bottom.as_str(),
+            "main",
+            "change 1 title",
+        ),
+        (
+            stack[1].change_id.as_str(),
+            12u64,
+            top.as_str(),
+            bottom.as_str(),
+            "change 2 title",
+        ),
+    ];
+    repo.seed_comment(
+        12,
+        201,
+        &common::stack_comment_body(&rows, &stack[1].change_id),
+    )?;
+
+    let output = repo.run(&["get", "12", "--no-edit"])?;
+    assert_success("get 12", &output);
+
+    assert_eq!(
+        repo.bookmark_target("forklift/frozen/pr-11")?,
+        stack[0].commit_id
+    );
+    assert_eq!(
+        repo.bookmark_target("forklift/frozen/pr-12")?,
+        stack[1].commit_id
+    );
+    assert!(
+        stdout_of(&output).contains(
+            "skip editing: run `jj new forklift/frozen/pr-12` to start editing above the fetched stack"
+        ),
+        "stdout:\n{}",
+        stdout_of(&output)
+    );
+    assert_eq!(
+        repo.cache_entry(&stack[0].change_id)?["pr_number"],
+        json!(11)
+    );
+    assert_eq!(
+        repo.cache_entry(&stack[1].change_id)?["pr_number"],
+        json!(12)
+    );
+    Ok(())
+}

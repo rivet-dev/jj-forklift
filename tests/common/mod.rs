@@ -21,6 +21,10 @@ use serde_json::{Value, json};
 
 pub const CONFIG_PREFIX: &str = "stack";
 
+pub fn branch_for(slug: &str, change_id: &str) -> String {
+    format!("stack/{slug}-{}", &change_id[..8])
+}
+
 pub struct TestRepo {
     pub root: PathBuf,
     pub work: PathBuf,

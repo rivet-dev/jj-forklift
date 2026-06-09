@@ -1,0 +1,133 @@
+use super::super::*;
+
+#[tracing::instrument(skip_all, fields(target = target))]
+pub(crate) fn get_stack(
+    runner: &impl CommandRunner,
+    config: &AppConfig,
+    target: &str,
+    auto_edit: bool,
+    diagnostics: Diagnostics,
+) -> Result<GetSummary> {
+    diagnostics.phase("resolve-github");
+    let mut github = GitHubContext::resolve(runner)
+        .map_err(|error| phase_error("resolve-github", "github", error))?;
+    let target = parse_get_target(target, &github.repo)?;
+    github.repo = target.repo().to_owned();
+
+    diagnostics.phase("resolve-stack-comment");
+    let target_pr = resolve_get_target_pr(runner, &github, target)?;
+    let target_pr_number = target_pr.number;
+    let comment = latest_stack_comment(runner, &github, target_pr_number, "get")?;
+    let mut pr_numbers = comment
+        .as_ref()
+        .map(|comment| parse_stack_pr_numbers(&comment.body))
+        .unwrap_or_default();
+    // The stack comment lists PRs top-to-bottom; downstream resolution expects
+    // bottom-to-top topology order (trunk-adjacent first).
+    pr_numbers.reverse();
+    if pr_numbers.is_empty() {
+        pr_numbers.push(target_pr_number);
+    }
+
+    diagnostics.phase("resolve-prs");
+    let mut prs = Vec::new();
+    let progress = diagnostics.progress_bar("Fetching", "pull requests", pr_numbers.len());
+    for (index, pr_number) in pr_numbers.into_iter().enumerate() {
+        prs.push(fetch_pr_by_number(runner, &github, "get", pr_number)?);
+        if let Some(progress) = &progress {
+            progress.set_position((index + 1) as u64);
+        }
+    }
+    if let Some(progress) = progress {
+        ui_finish_progress_bar(progress);
+    }
+    validate_get_pr_stack(config, &github, target_pr_number, &prs)?;
+
+    diagnostics.phase("fetch-stack");
+    fetch_get_branches(runner, config, &prs, diagnostics)?;
+    let pr_count = prs.len();
+
+    let Some(top_pr) = prs.last() else {
+        bail!("stack comment did not resolve any PRs");
+    };
+    let top_frozen = frozen_bookmark_name(top_pr.number);
+    let next_command = format!("jj new {top_frozen}");
+    if diagnostics.dry_run {
+        update_get_frozen_bookmarks(runner, &prs, diagnostics)?;
+        if auto_edit {
+            diagnostics.plan_line(&format!("- move working copy: {next_command}"));
+        } else {
+            diagnostics.plan_line(&format!(
+                "- skip editing: run `{next_command}` to start editing above the fetched stack"
+            ));
+        }
+        diagnostics.plan_line(
+            "- live GitHub discovery ran during planning; SQLite cache writes are skipped",
+        );
+        return Ok(GetSummary {
+            prs: pr_count,
+            fetched_branches: pr_count,
+            cache_entries: 0,
+            edited: false,
+        });
+    }
+
+    diagnostics.phase("resolve-fetched-heads");
+    let changes_by_pr = resolve_get_pr_changes(runner, &prs)
+        .map_err(|error| phase_error("resolve-fetched-heads", "fetched PR heads", error))?;
+
+    diagnostics.phase("freeze-stack");
+    update_get_frozen_bookmarks(runner, &prs, diagnostics)
+        .map_err(|error| phase_error("freeze-stack", "frozen bookmarks", error))?;
+
+    diagnostics.phase("write-cache");
+    let mut store = CacheStore::load_current_best_effort(runner, diagnostics, "write-cache")
+        .map_err(|error| phase_error("write-cache", "cache", error))?;
+    let mut cache_entries = 0;
+    for pr in prs {
+        let change = changes_by_pr
+            .get(&pr.number)
+            .with_context(|| format!("missing resolved jj change for PR #{}", pr.number))?;
+        store.upsert_pr(&github.repo, &change.change_id, pr.into_cache_entry(None));
+        cache_entries += 1;
+    }
+    if !store.save_best_effort(diagnostics, "write-cache") {
+        cache_entries = 0;
+    }
+
+    let edited = if auto_edit {
+        diagnostics.phase("edit-stack");
+        edit_get_stack(runner, &top_frozen, diagnostics)
+            .map_err(|error| phase_error("edit-stack", &top_frozen, error))?;
+        true
+    } else {
+        ui_info!("skip editing: run `{next_command}` to start editing above the fetched stack");
+        false
+    };
+
+    Ok(GetSummary {
+        prs: pr_count,
+        fetched_branches: pr_count,
+        cache_entries: cache_entries,
+        edited,
+    })
+}
+
+#[tracing::instrument(skip_all, fields(top = top_frozen))]
+pub(crate) fn edit_get_stack(
+    runner: &impl CommandRunner,
+    top_frozen: &str,
+    diagnostics: Diagnostics,
+) -> Result<()> {
+    let args = ["new", top_frozen];
+    diagnostics.command("jj", &args);
+    let output = runner.run("jj", &args)?;
+    if !output.success {
+        bail!(
+            "failed-command=`{}` error={}",
+            display_command("jj", &args),
+            output.stderr.trim()
+        );
+    }
+    Ok(())
+}
