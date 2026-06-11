@@ -28,3 +28,25 @@ fn status_from_secondary_workspace_succeeds() -> anyhow::Result<()> {
     assert_success("status from secondary workspace", &output);
     Ok(())
 }
+
+#[test]
+fn status_on_empty_current_change_lists_all_stack_entries() -> anyhow::Result<()> {
+    let repo = TestRepo::new("status-empty-current")?;
+    repo.init_main()?;
+    repo.create_change("side", "side title", "side body")?;
+    assert_success("submit side change", &repo.run(&["submit", "--yes"])?);
+    repo.jj(&["new", "main"])?;
+
+    let output = repo.run(&["status"])?;
+    assert_success("status from empty current change", &output);
+    let stdout = stdout_of(&output);
+    assert!(
+        stdout.contains("side title") && stdout.contains("initial"),
+        "status should show a jj log with the unmerged entry and trunk\nstdout:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("Info"),
+        "status should not print forklift Info lines around the jj log\nstdout:\n{stdout}"
+    );
+    Ok(())
+}

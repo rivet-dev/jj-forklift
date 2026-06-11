@@ -10,6 +10,16 @@ pub(super) struct CommandOutput {
 pub(super) trait CommandRunner {
     fn run(&self, program: &str, args: &[&str]) -> Result<CommandOutput>;
 
+    fn run_interactive(&self, program: &str, args: &[&str]) -> Result<()> {
+        let output = self.run(program, args)?;
+        print!("{}", output.stdout);
+        eprint!("{}", output.stderr);
+        if !output.success {
+            bail!("`{}` failed", display_command(program, args));
+        }
+        Ok(())
+    }
+
     /// Like `run`, but executes with `cwd` as the child process's working
     /// directory. Default impl ignores `cwd` and delegates to `run`, which is
     /// fine for test fakes that don't care about which directory they're
@@ -34,6 +44,21 @@ impl CommandRunner for SystemRunner {
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         })
+    }
+
+    #[tracing::instrument(skip_all)]
+    fn run_interactive(&self, program: &str, args: &[&str]) -> Result<()> {
+        let status = Command::new(program)
+            .args(args)
+            .status()
+            .with_context(|| format!("run `{}`", display_command(program, args)))?;
+        if !status.success() {
+            bail!(
+                "`{}` failed with status {status}",
+                display_command(program, args)
+            );
+        }
+        Ok(())
     }
 
     #[tracing::instrument(skip_all)]

@@ -17,7 +17,7 @@ pub(crate) fn run(
             serde_json::to_string_pretty(&report).context("serialize status json")?
         );
     } else {
-        print_status_report(&report);
+        print_status_stack_log(runner, &report.stack_log_revset)?;
     }
 
     Ok(())

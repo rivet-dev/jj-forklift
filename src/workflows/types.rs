@@ -113,6 +113,8 @@ pub(crate) struct StatusReport {
     pub(crate) branch_prefix: String,
     pub(crate) require_approval: bool,
     pub(crate) startup_aliases: StatusAliasState,
+    pub(crate) stack_log_revset: String,
+    pub(crate) stack_entries: Vec<StatusStackEntry>,
     pub(crate) owned_prs: Vec<StatusOwnedPr>,
     pub(crate) frozen_dependencies: Vec<StatusFrozenDependency>,
     pub(crate) first_owned_base_branch: Option<String>,
@@ -128,6 +130,16 @@ pub(crate) struct StatusAliasState {
     pub(crate) immutable_heads: Option<String>,
     pub(crate) base_immutable_heads: Option<String>,
     pub(crate) actions_needed: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct StatusStackEntry {
+    pub(crate) change_id: String,
+    pub(crate) commit_id: String,
+    pub(crate) title: String,
+    pub(crate) pr_number: Option<u64>,
+    pub(crate) head_branch: Option<String>,
+    pub(crate) current_stack: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
