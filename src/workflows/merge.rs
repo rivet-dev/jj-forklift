@@ -42,9 +42,11 @@ use super::*;
 ///      head == local commit == cache, base == trunk, approved unless
 ///      `--admin`/`--no-require-approval`, no auto-merge, mergeable,
 ///      mergeStateStatus, status checks unless `--admin`).
-/// 4. **merge-push** — `fast_forward_trunk_over_stack`: hard-check that remote
-///    `trunk` is an ancestor of the stack top (else bail: "run sync first"), set
-///    the local `trunk` bookmark to the top commit, and push **once**.
+/// 4. **merge-push** — `fast_forward_trunk_over_stack`: fetch the remote first
+///    (tracking refs go stale while other clones push trunk; jj would refuse
+///    the push with "stale info"), hard-check that remote `trunk` is an
+///    ancestor of the stack top (else bail: "run sync first"), set the local
+///    `trunk` bookmark to the top commit, and push **once**.
 /// 5. **verify-merge** — poll until GitHub has marked every PR `MERGED` (the
 ///    reachability merge is applied asynchronously after the push). This is the
 ///    safety net: if a PR doesn't flip, we fail loudly rather than leaving
@@ -537,6 +539,15 @@ pub(crate) fn fast_forward_trunk_over_stack(
     sync_command: &str,
     diagnostics: Diagnostics,
 ) -> Result<()> {
+    // Both the FF validation below and jj's own push-position check trust the
+    // local tracking ref for trunk, and merge has not fetched anything up to
+    // this point — while other clones push trunk concurrently. Refresh the
+    // tracking refs first so a trunk that moved on the remote surfaces as
+    // MergeSyncRequired (which merge recovers from by offering sync+submit)
+    // instead of jj refusing the push with "stale info", a state rerunning
+    // merge could never clear because it never fetched.
+    fetch_remote_preserving_local_commits(runner, config, diagnostics)?;
+
     validate_trunk_fast_forward_over_stack(runner, config, top_commit, sync_command)?;
 
     // jj's default `git.auto-local-bookmark = false` leaves a fetched remote

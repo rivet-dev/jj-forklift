@@ -259,6 +259,33 @@ impl TestRepo {
         Ok(advanced)
     }
 
+    /// Advance the bare remote's trunk from a separate `git` clone, the way
+    /// another machine or agent would. Unlike [`advance_remote_trunk`], the
+    /// workspace never sees the push, so jj's `main@origin` tracking ref is
+    /// left stale — the state that makes an unfetched `jj git push` refuse
+    /// with "stale info". Returns the new remote trunk commit id.
+    pub fn advance_remote_trunk_externally(&self, name: &str) -> anyhow::Result<String> {
+        let clone = self.root.join(format!("external-{name}").replace(' ', "-"));
+        run_ok(
+            "git",
+            &[
+                "clone",
+                "-b",
+                "main",
+                self.remote.to_str().unwrap(),
+                clone.to_str().unwrap(),
+            ],
+        )?;
+        run_ok_in(&clone, "git", &["config", "user.email", "external@example.com"])?;
+        run_ok_in(&clone, "git", &["config", "user.name", "External User"])?;
+        fs::write(clone.join("external.txt"), format!("{name}\n"))?;
+        run_ok_in(&clone, "git", &["add", "external.txt"])?;
+        run_ok_in(&clone, "git", &["commit", "-m", name])?;
+        run_ok_in(&clone, "git", &["push", "origin", "main"])?;
+        let head = run_stdout_in(&clone, "git", &["rev-parse", "HEAD"])?;
+        Ok(head.trim().to_owned())
+    }
+
     /// Produce real trunk divergence: advance the *remote* trunk to `remote` and
     /// move the *local* trunk bookmark to a different child `local` of the shared
     /// base, so neither is an ancestor of the other. Restores `@` to

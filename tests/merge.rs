@@ -571,3 +571,72 @@ fn merge_auto_tracks_untracked_trunk_before_fast_forward() -> anyhow::Result<()>
     assert_eq!(repo.stored_pr(21)?["state"], json!("MERGED"));
     Ok(())
 }
+
+#[test]
+fn merge_recovers_when_remote_trunk_moved_externally() -> anyhow::Result<()> {
+    let repo = TestRepo::new("merge-external-trunk-move")?;
+    repo.init_main()?;
+    let change = repo.create_change("change", "change title", "change body")?;
+    let branch = branch_for("change-title", &change.change_id);
+    repo.seed_pr_number(&branch, 9)?;
+    assert_success("submit", &repo.run(&["submit", "--yes"])?);
+
+    // Another clone lands work on trunk; this workspace's tracking refs are
+    // now stale, the state that used to make the merge push fail with jj's
+    // unrecoverable "stale info" refusal.
+    let external = repo.advance_remote_trunk_externally("external work")?;
+
+    // Merge fetches, sees trunk cannot fast-forward, and offers the
+    // sync+submit recovery; accept it and the retried merge lands.
+    let output = repo.run_tty_with_stdin(&["merge", "--admin"], "y\n")?;
+    assert_success("merge --admin after external trunk move", &output);
+    let stdout = stdout_of(&output);
+    assert!(
+        !stdout.contains("stale info"),
+        "merge must fetch instead of tripping jj's stale-info push check\nstdout:\n{stdout}"
+    );
+
+    // The stack was rebased onto the external commit and trunk fast-forwarded
+    // over it.
+    let rebased = repo.change_at(&change.change_id)?;
+    assert_ne!(
+        rebased.commit_id, change.commit_id,
+        "recovery should rebase the stack onto the moved trunk"
+    );
+    let parent = repo.rev_commit_id(&format!("{}-", rebased.commit_id))?;
+    assert_eq!(parent, external, "stack should sit on the external commit");
+    assert_eq!(repo.git_remote_branch_target("main")?, rebased.commit_id);
+    assert_eq!(repo.stored_pr(9)?["state"], json!("MERGED"));
+    Ok(())
+}
+
+#[test]
+fn merge_surfaces_sync_guidance_when_remote_trunk_moved_externally() -> anyhow::Result<()> {
+    let repo = TestRepo::new("merge-external-trunk-move-non-tty")?;
+    repo.init_main()?;
+    let change = repo.create_change("change", "change title", "change body")?;
+    let branch = branch_for("change-title", &change.change_id);
+    repo.seed_pr_number(&branch, 9)?;
+    assert_success("submit", &repo.run(&["submit", "--yes"])?);
+    let external = repo.advance_remote_trunk_externally("external work")?;
+
+    let output = repo.run(&["merge", "--admin"])?;
+    assert!(
+        !output.status.success(),
+        "non-interactive merge cannot run the sync recovery and must fail"
+    );
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("forklift merge --sync"),
+        "failure should point at the sync recovery command\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("stale info"),
+        "merge must fail with sync guidance, not jj's stale-info push refusal\nstderr:\n{stderr}"
+    );
+
+    // Nothing merged: remote trunk stays on the external commit, PR stays open.
+    assert_eq!(repo.git_remote_branch_target("main")?, external);
+    assert_eq!(repo.stored_pr(9)?["state"], json!("OPEN"));
+    Ok(())
+}
