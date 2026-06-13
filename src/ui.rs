@@ -159,6 +159,7 @@ pub(super) fn phase_label(phase: &str) -> (&'static str, &str) {
         "stack-comments" => ("Updating", "stack comments"),
         "rebase-stack" => ("Rebasing", "stack"),
         "move-trunk" => ("Moving", "trunk"),
+        "carry-working-copy" => ("Moving", "working copy"),
         "merge-push" => ("Merging", "fast-forward push"),
         "merge-refresh-above" => ("Refreshing", "stack above merge"),
         "merge-submit" => ("Submitting", "stack"),

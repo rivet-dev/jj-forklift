@@ -50,6 +50,8 @@ pub(crate) fn sync_stack(
         diagnostics.phase("move-trunk");
         move_trunk_to_remote(runner, config, diagnostics)
             .map_err(|error| phase_error("move-trunk", &config.trunk, error))?;
+        carry_empty_working_copy_to_trunk(runner, config, diagnostics)
+            .map_err(|error| phase_error("carry-working-copy", "@", error))?;
         return Ok(SyncSummary {
             rebased_roots: 0,
             submit_ran: false,
@@ -87,6 +89,8 @@ pub(crate) fn sync_stack(
     diagnostics.phase("move-trunk");
     move_trunk_to_remote(runner, config, diagnostics)
         .map_err(|error| phase_error("move-trunk", &config.trunk, error))?;
+    carry_empty_working_copy_to_trunk(runner, config, diagnostics)
+        .map_err(|error| phase_error("carry-working-copy", "@", error))?;
 
     if stack_resolution.owned.is_empty() {
         return Ok(SyncSummary {
@@ -493,6 +497,76 @@ pub(crate) fn validate_sync_frozen_pr_metadata(
         )));
     }
 
+    Ok(())
+}
+
+/// A fresh `jj new <trunk>` working copy is empty, so the stack revset never
+/// includes it and the stack rebase leaves it stranded on the old trunk
+/// commit when sync moves trunk forward. Carry it onto the new tip.
+/// Conservative: only a conflict-free empty working copy with a single
+/// parent that is now strictly behind trunk, and no children, is moved — an
+/// empty rev sitting on a stack change already followed the stack rebase.
+pub(crate) fn carry_empty_working_copy_to_trunk(
+    runner: &impl CommandRunner,
+    config: &AppConfig,
+    diagnostics: Diagnostics,
+) -> Result<()> {
+    let info = run_required(
+        runner,
+        "jj",
+        &[
+            "log",
+            "--no-graph",
+            "-r",
+            "@",
+            "-T",
+            r#"if(empty, "true", "false") ++ "\t" ++ if(conflict, "true", "false") ++ "\t" ++ parents.map(|c| c.commit_id()).join(",")"#,
+        ],
+    )?;
+    let mut fields = info.split('\t');
+    let empty = fields.next() == Some("true");
+    let conflict = fields.next() == Some("true");
+    let parents = fields
+        .next()
+        .unwrap_or_default()
+        .split(',')
+        .filter(|id| !id.is_empty())
+        .collect::<Vec<_>>();
+    let [parent] = parents.as_slice() else {
+        return Ok(());
+    };
+    if !empty || conflict {
+        return Ok(());
+    }
+    let trunk_tip = resolve_single_rev(runner, &config.trunk)?;
+    if *parent == trunk_tip {
+        return Ok(());
+    }
+    if list_commit_ids(runner, &format!("{parent} & ::{trunk_tip}"))?.is_empty() {
+        return Ok(());
+    }
+    if !list_commit_ids(runner, "children(@)")?.is_empty() {
+        return Ok(());
+    }
+
+    diagnostics.phase("carry-working-copy");
+    let args = ["rebase", "-r", "@", "-d", trunk_tip.as_str()];
+    if diagnostics.dry_run {
+        diagnostics.plan_line(&format!(
+            "- move the empty working copy onto trunk `{}`",
+            config.trunk
+        ));
+        return Ok(());
+    }
+    diagnostics.command("jj", &args);
+    let output = runner.run("jj", &args)?;
+    if !output.success {
+        bail!(
+            "failed-command=`{}` error={}",
+            display_command("jj", &args),
+            output.stderr.trim()
+        );
+    }
     Ok(())
 }
 

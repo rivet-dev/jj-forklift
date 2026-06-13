@@ -417,3 +417,58 @@ fn sync_recovers_trunk_stranded_on_stack_by_failed_merge_push() -> anyhow::Resul
     assert_eq!(parent, external, "stack should sit on the external commit");
     Ok(())
 }
+
+#[test]
+fn sync_carries_empty_working_copy_onto_moved_trunk() -> anyhow::Result<()> {
+    let repo = TestRepo::new("sync-carry-empty-wc")?;
+    repo.init_main()?;
+    // A fresh `jj new main` working copy: empty, so the stack revset never
+    // includes it and sync used to leave it stranded on the old trunk commit.
+    repo.jj(&["new", "main"])?;
+    let wc_before = repo.change_at("@")?;
+    // Advance trunk from another clone so the local workspace (and its empty
+    // working copy, which jj would discard on checkout) is never touched.
+    let advanced = repo.advance_remote_trunk_externally("remote work")?;
+
+    let output = repo.run(&["sync"])?;
+    assert_success("sync", &output);
+
+    // Trunk moved to the remote tip and the empty working copy moved with it.
+    assert_eq!(repo.bookmark_target("main")?, advanced);
+    let wc_after = repo.change_at("@")?;
+    assert_eq!(
+        wc_after.change_id, wc_before.change_id,
+        "sync should move the same working-copy change, not create a new one"
+    );
+    let parent = repo.rev_commit_id(&format!("{}-", wc_after.commit_id))?;
+    assert_eq!(parent, advanced, "working copy should sit on the new trunk");
+    Ok(())
+}
+
+#[test]
+fn sync_leaves_empty_working_copy_on_rebased_stack_top() -> anyhow::Result<()> {
+    let repo = TestRepo::new("sync-empty-wc-on-stack")?;
+    repo.init_main()?;
+    let change = repo.create_change("change", "change title", "change body")?;
+    // Empty working copy on top of the stack: it follows the stack rebase and
+    // must not be re-targeted onto trunk away from its stack parent.
+    repo.jj(&["new"])?;
+    let wc_before = repo.change_at("@")?;
+    let advanced = repo.advance_remote_trunk_externally("remote work")?;
+
+    let output = repo.run(&["sync"])?;
+    assert_success("sync", &output);
+
+    let rebased = repo.change_at(&change.change_id)?;
+    assert_ne!(rebased.commit_id, change.commit_id, "stack should be rebased");
+    let stack_parent = repo.rev_commit_id(&format!("{}-", rebased.commit_id))?;
+    assert_eq!(stack_parent, advanced);
+    let wc_after = repo.change_at("@")?;
+    assert_eq!(wc_after.change_id, wc_before.change_id);
+    let wc_parent = repo.rev_commit_id(&format!("{}-", wc_after.commit_id))?;
+    assert_eq!(
+        wc_parent, rebased.commit_id,
+        "empty working copy should stay on the rebased stack top, not move to trunk"
+    );
+    Ok(())
+}
