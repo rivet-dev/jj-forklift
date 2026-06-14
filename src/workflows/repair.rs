@@ -329,8 +329,16 @@ pub(crate) fn unfreeze_before_retrying_merge(
     diagnostics: Diagnostics,
 ) -> Result<()> {
     let unfreeze_commands = merge_unfreeze_commands(&unfreeze_required.unfreeze_targets);
-    let merge_command = format!("forklift merge {}", unfreeze_required.target);
-    let sync_command = format!("forklift sync {} --submit --yes", unfreeze_required.target);
+    let (merge_command, sync_command) = match &unfreeze_required.target {
+        Some(target) => (
+            format!("forklift merge {target}"),
+            format!("forklift sync {target} --submit --yes"),
+        ),
+        None => (
+            "forklift merge".to_owned(),
+            "forklift sync --submit --yes".to_owned(),
+        ),
+    };
     if !io::stdin().is_terminal() {
         let diagnostic = unfreeze_required.cli_error();
         return Err(CliError::new(diagnostic.message)
@@ -346,11 +354,11 @@ pub(crate) fn unfreeze_before_retrying_merge(
     }
 
     tracing::debug!(
-        target = %unfreeze_required.target,
+        target = unfreeze_required.target.as_deref().unwrap_or("<stack>"),
         reason = %unfreeze_required.reason,
         "merge requires unfreeze before retry"
     );
-    eprintln!("Merge target is frozen.");
+    eprintln!("{}.", unfreeze_required.message);
     eprint!(
         "Run {unfreeze_commands}, then sync+submit the adopted stack, then retry merge? [y/N] "
     );

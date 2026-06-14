@@ -60,9 +60,14 @@ pub(crate) fn run(
                 )?;
             } else if let Some(unfreeze_required) = find_merge_unfreeze_required(&error) {
                 unfreeze_before_retrying_merge(runner, &config, &unfreeze_required, diagnostics)?;
-                let sync_revset = effective_sync_revset(runner, Some(&unfreeze_required.target))
-                    .map_err(|error| {
-                        phase_error("resolve-sync-target", &unfreeze_required.target, error)
+                let sync_target = unfreeze_required.target.as_deref();
+                let sync_revset =
+                    effective_sync_revset(runner, sync_target).map_err(|error| {
+                        phase_error(
+                            "resolve-sync-target",
+                            sync_target.unwrap_or(DEFAULT_STACK_REVSET),
+                            error,
+                        )
                     })?;
                 sync_stack(
                     runner,

@@ -150,7 +150,8 @@ pub(crate) fn diagnose_empty_targeted_merge(
                 .join(", ");
             let unfreeze_commands = merge_unfreeze_commands(&unfreeze_targets);
             return Err(MergeUnfreezeRequired::new(
-                target.input.clone(),
+                "merge target is frozen",
+                Some(target.input.clone()),
                 unfreeze_targets,
                 format!("{} is covered by {bookmark_names}", target.commit_id),
                 format!(
@@ -307,13 +308,21 @@ pub(crate) fn merge_stack(
         Err(error) if error.downcast_ref::<MergeSubmitRequired>().is_some() => return Err(error),
         Err(error) => return Err(phase_error("merge-pr-lookup", &bottom.change_id, error)),
     };
-    validate_merge_frozen_dependencies(runner, config, &context, &bottom_pr).map_err(|error| {
-        phase_error(
-            "merge-frozen-check",
-            format!("PR #{}", bottom_pr.number),
-            error,
-        )
-    })?;
+    validate_merge_frozen_dependencies(runner, config, &context, target, &bottom_pr).map_err(
+        |error| {
+            // Keep the typed unfreeze signal in the chain so the command layer can
+            // prompt and retry; `phase_error` would rebuild it into a plain error.
+            if error.downcast_ref::<MergeUnfreezeRequired>().is_some() {
+                error
+            } else {
+                phase_error(
+                    "merge-frozen-check",
+                    format!("PR #{}", bottom_pr.number),
+                    error,
+                )
+            }
+        },
+    )?;
 
     // Resolve and validate every PR in the stack. Re-point each PR's base to
     // trunk so a single fast-forward push of trunk auto-merges all of them:
@@ -996,12 +1005,18 @@ pub(crate) fn validate_merge_frozen_dependencies(
     runner: &impl CommandRunner,
     config: &AppConfig,
     context: &AppContext,
+    target: Option<&MergeTarget>,
     bottom_owned_pr: &GhMergePr,
 ) -> Result<()> {
     if context.frozen_dependencies.is_empty() {
         return Ok(());
     }
 
+    // `frozen_dependencies` is ordered bottom-up (nearest trunk first). Collect
+    // the still-open ones: they must be adopted (unfrozen) before the owned
+    // stack can land, since the merge would otherwise put owned commits on trunk
+    // ahead of their unmerged dependencies.
+    let mut open: Vec<(&FrozenDependency, u64)> = Vec::new();
     for dependency in &context.frozen_dependencies {
         let pr = fetch_pr_for_merge(
             runner,
@@ -1010,15 +1025,8 @@ pub(crate) fn validate_merge_frozen_dependencies(
             dependency.bookmark.pr_number,
         )?;
         if pr.state.eq_ignore_ascii_case("OPEN") {
-            bail!(
-                CliError::new(format!(
-                    "frozen dependency `{}` is still open as PR #{}",
-                    dependency.bookmark.name, pr.number
-                ))
-                .resolution("merge dependencies, then run `forklift sync`")
-            );
-        }
-        if !pr.state.eq_ignore_ascii_case("MERGED") {
+            open.push((dependency, pr.number));
+        } else if !pr.state.eq_ignore_ascii_case("MERGED") {
             bail!(
                 CliError::new(format!(
                     "frozen dependency `{}` PR #{} is `{}`",
@@ -1027,6 +1035,10 @@ pub(crate) fn validate_merge_frozen_dependencies(
                 .resolution("run `forklift sync` before merging owned PRs")
             );
         }
+    }
+
+    if !open.is_empty() {
+        return Err(merge_unfreeze_required_for_open_dependencies(target, &open));
     }
 
     if !bottom_owned_pr
@@ -1043,6 +1055,54 @@ pub(crate) fn validate_merge_frozen_dependencies(
     }
 
     Ok(())
+}
+
+/// Build the `MergeUnfreezeRequired` signal for a stack whose merge is blocked by
+/// still-open frozen dependencies. The command layer catches this to prompt the
+/// user, adopt the dependencies with `forklift unfreeze`, sync, and retry.
+///
+/// `open` is bottom-up; unfreeze must run top-down so each revision is mutable
+/// once the frozen bookmarks above it are gone, so the targets are reversed.
+fn merge_unfreeze_required_for_open_dependencies(
+    target: Option<&MergeTarget>,
+    open: &[(&FrozenDependency, u64)],
+) -> anyhow::Error {
+    let top_down = open.iter().rev().collect::<Vec<_>>();
+    let unfreeze_targets = top_down
+        .iter()
+        .map(|(_, number)| number.to_string())
+        .collect::<Vec<_>>();
+    let listed = top_down
+        .iter()
+        .map(|(dependency, number)| format!("PR #{number} (`{}`)", dependency.bookmark.name))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let count = open.len();
+    let noun = if count == 1 {
+        "dependency"
+    } else {
+        "dependencies"
+    };
+    let target_input = target.map(|target| target.input.clone());
+    let unfreeze_commands = merge_unfreeze_commands(&unfreeze_targets);
+    let (merge_command, sync_command) = match &target_input {
+        Some(input) => (
+            format!("forklift merge {input}"),
+            format!("forklift sync {input} --submit --yes"),
+        ),
+        None => (
+            "forklift merge".to_owned(),
+            "forklift sync --submit --yes".to_owned(),
+        ),
+    };
+    MergeUnfreezeRequired::new(
+        format!("merge blocked by {count} open frozen {noun}"),
+        target_input,
+        unfreeze_targets,
+        format!("{listed} still open"),
+        format!("run {unfreeze_commands}, then `{sync_command}`, then rerun `{merge_command}`"),
+    )
+    .into()
 }
 
 pub(crate) fn resolve_merge_pr(

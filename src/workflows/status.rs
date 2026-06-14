@@ -121,7 +121,7 @@ pub(crate) fn status_report(
                 match fetch_pr_for_merge(runner, &context.github, &change.change_id, pr_number) {
                     Ok(pr) => {
                         if let Err(error) =
-                            validate_merge_frozen_dependencies(runner, config, &context, &pr)
+                            validate_merge_frozen_dependencies(runner, config, &context, None, &pr)
                         {
                             merge_blockers.push(error.to_string());
                         } else {

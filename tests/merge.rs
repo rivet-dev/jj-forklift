@@ -259,6 +259,12 @@ fn merge_refuses_open_frozen_dependency_below_owned_pr() -> anyhow::Result<()> {
             && stderr.contains("still open"),
         "stderr:\n{stderr}"
     );
+    assert!(
+        stderr.contains(
+            "resolution:\n  run `forklift unfreeze 11`, then `forklift sync --submit --yes`, then rerun `forklift merge`"
+        ),
+        "non-interactive merge should guide the user to unfreeze the dependency:\n{stderr}"
+    );
     assert_eq!(
         repo.git_remote_branch_target("main")?,
         main,
@@ -266,6 +272,39 @@ fn merge_refuses_open_frozen_dependency_below_owned_pr() -> anyhow::Result<()> {
     );
     assert_eq!(repo.stored_pr(11)?["state"], json!("OPEN"));
     assert_eq!(repo.stored_pr(12)?["state"], json!("OPEN"));
+    Ok(())
+}
+
+#[test]
+fn merge_prompts_to_unfreeze_open_dependency_then_lands_whole_stack() -> anyhow::Result<()> {
+    let repo = TestRepo::new("merge-unfreeze-dependency-prompt")?;
+    repo.init_main()?;
+    let main = repo.bookmark_target("main")?;
+    let stack = repo.create_linear_stack(2)?;
+    let bottom = branch_for("change-1-title", &stack[0].change_id);
+    let top = branch_for("change-2-title", &stack[1].change_id);
+    repo.set_bookmark(&bottom, &stack[0].commit_id)?;
+    repo.set_bookmark(&top, &stack[1].commit_id)?;
+    repo.push_bookmark(&bottom)?;
+    repo.push_bookmark(&top)?;
+    repo.seed_pr(11, &bottom, "main", "change 1 title", "change 1 body")?;
+    repo.seed_pr(12, &top, &bottom, "change 2 title", "change 2 body")?;
+    // Freeze the lower dependency PR while the owned stack is the top PR.
+    repo.set_bookmark("forklift/frozen/pr-11", &stack[0].commit_id)?;
+    repo.clear_gh_requests()?;
+
+    let output = repo.run_tty_with_stdin(&["merge", "--admin"], "y\n")?;
+    assert_success("merge --admin with unfreeze prompt", &output);
+
+    // Accepting the prompt adopts the frozen dependency and lands the whole
+    // chain, not just the owned PR.
+    assert_eq!(repo.stored_pr(11)?["state"], json!("MERGED"));
+    assert_eq!(repo.stored_pr(12)?["state"], json!("MERGED"));
+    assert_ne!(
+        repo.git_remote_branch_target("main")?,
+        main,
+        "merge should advance trunk over the adopted stack"
+    );
     Ok(())
 }
 

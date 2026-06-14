@@ -190,7 +190,9 @@ impl Error for MergeSyncRequired {}
 
 #[derive(Debug, Clone)]
 pub(super) struct MergeUnfreezeRequired {
-    pub(super) target: String,
+    pub(super) message: String,
+    /// The merge target the user passed, or `None` for a whole-stack merge.
+    pub(super) target: Option<String>,
     pub(super) unfreeze_targets: Vec<String>,
     pub(super) reason: String,
     pub(super) resolution: String,
@@ -198,13 +200,15 @@ pub(super) struct MergeUnfreezeRequired {
 
 impl MergeUnfreezeRequired {
     pub(super) fn new(
-        target: impl Into<String>,
+        message: impl Into<String>,
+        target: Option<String>,
         unfreeze_targets: Vec<String>,
         reason: impl Into<String>,
         resolution: impl Into<String>,
     ) -> Self {
         Self {
-            target: target.into(),
+            message: message.into(),
+            target,
             unfreeze_targets,
             reason: reason.into(),
             resolution: resolution.into(),
@@ -212,7 +216,7 @@ impl MergeUnfreezeRequired {
     }
 
     pub(super) fn cli_error(&self) -> CliError {
-        CliError::new("merge target is frozen")
+        CliError::new(self.message.clone())
             .reason(self.reason.clone())
             .resolution(self.resolution.clone())
     }
