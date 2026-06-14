@@ -122,6 +122,42 @@ fn submit_tolerates_described_empty_spacer_below_stack() -> anyhow::Result<()> {
 }
 
 #[test]
+fn submit_names_empty_change_wedged_in_middle_of_stack() -> anyhow::Result<()> {
+    let repo = TestRepo::new("submit-mid-stack-empty")?;
+    repo.init_main()?;
+    // A described but empty change wedged between real changes (the leftover of a
+    // rebase or squash). The stack revset's `~empty()` drops it, severing the
+    // parent link so the change above looks like a second root. Submit must name
+    // the empty change, not bail with the misleading "multiple roots".
+    repo.create_change("bottom", "bottom title", "bottom body")?;
+    repo.create_change("lower", "lower title", "lower body")?;
+    let empty = repo.create_empty_change("leftover empty after squash")?;
+    repo.create_change("upper", "upper title", "upper body")?;
+    repo.create_change("top", "top title", "top body")?;
+
+    let output = repo.run(&["submit", "--yes"])?;
+    assert!(
+        !output.status.success(),
+        "submit must reject a stack fragmented by a mid-stack empty change\nstderr:\n{}",
+        stderr_of(&output)
+    );
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("wedged in the middle of the stack"),
+        "error should name the empty change as the culprit\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(&format!("jj abandon {}", &empty.change_id[..8])),
+        "resolution should suggest abandoning the specific empty change\nstderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("stack has multiple roots"),
+        "the misleading multiple-roots message should be replaced\nstderr:\n{stderr}"
+    );
+    Ok(())
+}
+
+#[test]
 fn submit_requires_confirmation_before_mutation() -> anyhow::Result<()> {
     let repo = TestRepo::new("submit-confirm")?;
     repo.init_main()?;

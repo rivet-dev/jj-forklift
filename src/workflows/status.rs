@@ -182,7 +182,7 @@ pub(crate) fn resolve_optional_status_context(
             frozen_dependencies: Vec::new(),
         }
     } else {
-        validate_stack_shape(&stack, revset)?;
+        validate_stack_shape(runner, &stack, revset)?;
         resolve_stack_resolution(runner, stack, frozen_bookmarks)?
     };
     let github = GitHubContext::resolve(runner)?;

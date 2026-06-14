@@ -285,7 +285,7 @@ pub(crate) fn merge_stack(
         }
         return Ok(summary);
     }
-    validate_stack_shape(&stack, revset)
+    validate_stack_shape(runner, &stack, revset)
         .map_err(|error| phase_error("resolve-stack", revset, error))?;
     let stack_resolution = resolve_stack_resolution(runner, stack, frozen_bookmarks)
         .map_err(|error| phase_error("resolve-stack", "frozen-dependencies", error))?;

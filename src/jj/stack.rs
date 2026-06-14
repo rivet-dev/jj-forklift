@@ -89,7 +89,7 @@ pub(crate) fn resolve_stack_context(
     resolve_single_rev(runner, "trunk()")?;
     let frozen_bookmarks = frozen_bookmarks(runner)?;
     let stack = resolve_stack(runner, revset)?;
-    validate_stack_shape(&stack, revset)?;
+    validate_stack_shape(runner, &stack, revset)?;
     let stack_resolution = resolve_stack_resolution(runner, stack, frozen_bookmarks)?;
     let github = GitHubContext::resolve(runner)?;
 
@@ -212,7 +212,11 @@ pub(crate) fn warn_divergent_changes(stack: &[ResolvedChange]) {
 }
 
 #[tracing::instrument(skip_all, fields(revset = %revset))]
-pub(crate) fn validate_stack_shape(stack: &[ResolvedChange], revset: &str) -> Result<()> {
+pub(crate) fn validate_stack_shape(
+    runner: &impl CommandRunner,
+    stack: &[ResolvedChange],
+    revset: &str,
+) -> Result<()> {
     if stack.is_empty() {
         bail!(
             CliError::new(format!("empty stack selected by `{revset}`"))
@@ -263,6 +267,45 @@ pub(crate) fn validate_stack_shape(stack: &[ResolvedChange], revset: &str) -> Re
             .map(|change| change_label(change))
             .collect::<Vec<_>>()
             .join(", ");
+
+        // The most common cause of phantom roots is an empty change wedged in the
+        // middle of the stack: the revset's `~empty()` drops it, severing the
+        // parent link so the change above it looks like a second root. Name the
+        // empty change instead of the misleading "multiple roots".
+        let bridges = empty_changes_bridging_roots(runner, stack, &selected_commits);
+        if !bridges.is_empty() {
+            let noun = if bridges.len() == 1 {
+                "change"
+            } else {
+                "changes"
+            };
+            let verb = if bridges.len() == 1 { "is" } else { "are" };
+            let bridge_labels = bridges
+                .iter()
+                .map(change_label)
+                .collect::<Vec<_>>()
+                .join(", ");
+            let abandon_ids = bridges
+                .iter()
+                .map(|change| short_change_id(&change.change_id))
+                .collect::<Vec<_>>()
+                .join(" ");
+            // The headline is replaced by `phase_error` ("could not resolve
+            // stack ..."), so the actionable detail must live in the reason and
+            // resolution, which survive: name the empty change and how to fix it.
+            bail!(
+                CliError::new(format!(
+                    "empty {noun} {bridge_labels} wedged in the middle of the stack"
+                ))
+                .reason(format!(
+                    "empty {noun} {bridge_labels} {verb} wedged in the middle of the stack — forklift skips empty changes, which splits the otherwise-linear stack into separate roots ({root_labels})"
+                ))
+                .resolution(format!(
+                    "abandon or amend the empty {noun} (most likely leftover after a rebase or squash), then rerun — e.g. `jj abandon {abandon_ids}`"
+                ))
+            );
+        }
+
         bail!(
             CliError::new(format!("stack has multiple roots ({})", roots.len()))
                 .reason(root_labels.clone())
@@ -312,6 +355,69 @@ pub(crate) fn selected_parent<'a>(
         .iter()
         .map(String::as_str)
         .find(|parent_id| selected_commits.contains(parent_id))
+}
+
+/// Find empty changes that sit *between* two selected stack changes.
+///
+/// The stack revset excludes empty changes, so an empty change wedged mid-stack
+/// severs the parent link and makes the change above it look like a second root.
+/// For each root, walk from its excluded parent down through contiguous empty
+/// changes; keep the empties only when the walk reconnects to another selected
+/// change (proving the empty is wedged *between* real changes, not trailing
+/// below the stack). Best-effort: any jj lookup failure just falls back to the
+/// generic "multiple roots" error.
+fn empty_changes_bridging_roots(
+    runner: &impl CommandRunner,
+    stack: &[ResolvedChange],
+    selected_commits: &HashSet<&str>,
+) -> Vec<ResolvedChange> {
+    let trunk = resolve_single_rev(runner, "trunk()").ok();
+    let mut bridges = Vec::new();
+    let mut reported = HashSet::new();
+    let mut visited = HashSet::new();
+    for change in stack {
+        if selected_parent(change, selected_commits).is_some() {
+            continue;
+        }
+        for parent_id in &change.parent_ids {
+            if selected_commits.contains(parent_id.as_str())
+                || trunk.as_deref() == Some(parent_id.as_str())
+            {
+                continue;
+            }
+            let mut chain: Vec<ResolvedChange> = Vec::new();
+            let mut current = parent_id.clone();
+            loop {
+                if selected_commits.contains(current.as_str()) {
+                    for empty in chain.drain(..) {
+                        if reported.insert(empty.commit_id.clone()) {
+                            bridges.push(empty);
+                        }
+                    }
+                    break;
+                }
+                if trunk.as_deref() == Some(current.as_str()) || !visited.insert(current.clone()) {
+                    break;
+                }
+                let Some(resolved) = resolve_stack(runner, &current)
+                    .ok()
+                    .and_then(|changes| changes.into_iter().next())
+                else {
+                    break;
+                };
+                if !resolved.empty {
+                    break;
+                }
+                let next = resolved.parent_ids.first().cloned();
+                chain.push(resolved);
+                match next {
+                    Some(parent) => current = parent,
+                    None => break,
+                }
+            }
+        }
+    }
+    bridges
 }
 
 pub(crate) fn print_github_context(github: &GitHubContext) {

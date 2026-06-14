@@ -64,7 +64,7 @@ pub(crate) fn sync_stack(
         resolve_purely_frozen_stack(runner, frozen_bookmarks)
     } else {
         (|| {
-            validate_stack_shape(&stack, revset)?;
+            validate_stack_shape(runner, &stack, revset)?;
             resolve_stack_resolution(runner, stack, frozen_bookmarks)
         })()
     }
