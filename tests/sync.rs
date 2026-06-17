@@ -472,3 +472,41 @@ fn sync_leaves_empty_working_copy_on_rebased_stack_top() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+/// Regression: with the owned root on an un-merged, un-frozen open-PR commit,
+/// sync must refuse rather than plan `jj rebase -s <root> -d trunk`, which would
+/// drop the un-merged parent from the ancestry (silent history loss).
+#[test]
+fn sync_refuses_to_rebase_onto_trunk_past_unmerged_parent() -> anyhow::Result<()> {
+    let repo = TestRepo::new("sync-unmerged-parent")?;
+    repo.init_main()?;
+
+    let parent = repo.create_change("parent", "parent title", "parent body")?;
+    let parent_branch = branch_for("parent-title", &parent.change_id);
+    repo.set_bookmark(&parent_branch, &parent.commit_id)?;
+    repo.push_bookmark(&parent_branch)?;
+    repo.seed_pr(11, &parent_branch, "main", "parent title", "parent body")?;
+    repo.jj(&["bookmark", "untrack", &format!("{parent_branch}@origin")])?;
+
+    let _child = repo.create_change("child", "child title", "child body")?;
+
+    let output = repo.run(&["sync", "--dry-run"])?;
+    assert!(
+        !output.status.success(),
+        "sync should refuse a stack based on an un-merged parent\nstdout:\n{}\nstderr:\n{}",
+        stdout_of(&output),
+        stderr_of(&output)
+    );
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("un-merged commit") && stderr.contains("not a frozen dependency"),
+        "stderr should explain the un-merged base:\n{stderr}"
+    );
+    // The destructive rebase onto trunk must never have been planned.
+    let combined = format!("{}{stderr}", stdout_of(&output));
+    assert!(
+        !combined.contains("rebase stack root") && !combined.contains("-d main"),
+        "sync must not plan a rebase onto trunk\noutput:\n{combined}"
+    );
+    Ok(())
+}

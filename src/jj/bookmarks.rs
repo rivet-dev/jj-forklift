@@ -148,19 +148,18 @@ pub(crate) fn resolve_stack_resolution(
     owned: Vec<ResolvedChange>,
     frozen_bookmarks: Vec<FrozenBookmark>,
 ) -> Result<StackResolution> {
-    if frozen_bookmarks.is_empty() {
-        return Ok(StackResolution {
-            owned,
-            frozen_dependencies: Vec::new(),
-        });
-    }
-
-    let frozen_changes = resolve_frozen_changes(runner, frozen_bookmarks)?;
-    let frozen_dependencies = frozen_dependencies_below_owned(&owned, frozen_changes)?;
-    Ok(StackResolution {
+    let frozen_dependencies = if frozen_bookmarks.is_empty() {
+        Vec::new()
+    } else {
+        let frozen_changes = resolve_frozen_changes(runner, frozen_bookmarks)?;
+        frozen_dependencies_below_owned(&owned, frozen_changes)?
+    };
+    let resolution = StackResolution {
         owned,
         frozen_dependencies,
-    })
+    };
+    validate_owned_base(runner, &resolution)?;
+    Ok(resolution)
 }
 
 pub(crate) fn resolve_purely_frozen_stack(

@@ -790,3 +790,53 @@ fn submit_repins_to_rewritten_commit_instead_of_resurrecting_hidden_id() -> anyh
     assert_eq!(repo.stored_pr(9)?["headRefName"], json!(branch));
     Ok(())
 }
+
+/// Regression: the owned stack root sits on an un-merged commit that is the head
+/// of an open PR (it carries a pushed `stack/*` remote bookmark) but was never
+/// frozen via `forklift get`. Submit must refuse rather than silently base the
+/// bottom PR on trunk, which would bloat its diff with the un-merged parent.
+#[test]
+fn submit_refuses_when_owned_root_parent_is_unmerged_open_pr() -> anyhow::Result<()> {
+    let repo = TestRepo::new("submit-unmerged-parent")?;
+    repo.init_main()?;
+
+    // An open PR's head commit: pushed and made immutable via an untracked
+    // remote bookmark (so it falls out of the owned stack), but never frozen.
+    let parent = repo.create_change("parent", "parent title", "parent body")?;
+    let parent_branch = branch_for("parent-title", &parent.change_id);
+    repo.set_bookmark(&parent_branch, &parent.commit_id)?;
+    repo.push_bookmark(&parent_branch)?;
+    repo.seed_pr(11, &parent_branch, "main", "parent title", "parent body")?;
+    repo.jj(&["bookmark", "untrack", &format!("{parent_branch}@origin")])?;
+    assert!(
+        !repo.is_mutable(&parent.commit_id)?,
+        "parent should be immutable so it falls out of the owned stack"
+    );
+
+    // The owned stack sits directly on that un-merged, un-frozen parent.
+    let child = repo.create_change("child", "child title", "child body")?;
+    let child_branch = branch_for("child-title", &child.change_id);
+    repo.seed_pr_number(&child_branch, 12)?;
+
+    let output = repo.run(&["submit", "--yes"])?;
+    assert!(
+        !output.status.success(),
+        "submit should refuse a stack based on an un-merged parent\nstderr:\n{}",
+        stderr_of(&output)
+    );
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("un-merged commit") && stderr.contains("not a frozen dependency"),
+        "stderr should explain the un-merged base:\n{stderr}"
+    );
+    // It must not have created any PR for the child (which would be trunk-based).
+    assert!(
+        !repo.gh_request_matches(&["api", "-X", "POST", "repos/owner/repo/pulls"])?,
+        "submit must not create a trunk-based PR\nstderr:\n{stderr}"
+    );
+    assert!(
+        !repo.remote_branch_exists(&child_branch)?,
+        "submit must not push the child branch"
+    );
+    Ok(())
+}
