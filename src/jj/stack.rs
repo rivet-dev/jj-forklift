@@ -346,6 +346,65 @@ pub(crate) fn validate_stack_shape(
     Ok(())
 }
 
+/// Refuse to submit/sync when the owned stack root sits on a commit that is
+/// neither in trunk nor a frozen dependency. Without this guard forklift would
+/// silently treat such a stack as trunk-based: submit would plan the bottom PR
+/// with `base=trunk` (a bloated diff carrying the intervening un-merged commits)
+/// and sync would plan `jj rebase -s <root> -d trunk`, dropping those un-merged
+/// parents from the ancestry. The dangerous parent is typically the head of a
+/// separately-submitted but still-open PR that was never `forklift get`-frozen.
+///
+/// Detection is by ancestry, not parent adjacency, so empty spacer commits
+/// (e.g. a leftover `jj new` between trunk and the root) and the frozen-dep
+/// chain are correctly ignored: any *non-empty* ancestor of the root that is
+/// not in `::trunk()` and not a frozen dependency is the dangerous case.
+pub(crate) fn validate_owned_base(
+    runner: &impl CommandRunner,
+    resolution: &StackResolution,
+) -> Result<()> {
+    if resolution.owned.is_empty() {
+        return Ok(());
+    }
+    // When a frozen dependency covers the owned root, submit bases the bottom PR
+    // on that dependency's branch and sync rebases the root onto it — never onto
+    // trunk — and the frozen-dependency checks own the chain below it. Only the
+    // no-frozen-dependency case falls back to trunk, which is the destructive
+    // path this guard exists to stop.
+    if !resolution.frozen_dependencies.is_empty() {
+        return Ok(());
+    }
+    let root = stack_root(&resolution.owned)?;
+
+    // Any non-empty ancestor of the root that is not already in trunk is an
+    // un-merged commit the stack is built on. Empty spacer commits (e.g. a
+    // leftover `jj new` between trunk and the root) are excluded by `~empty()`,
+    // so detection is by ancestry rather than parent adjacency.
+    let revset = format!(
+        "(::{root} ~ ::trunk() ~ {root}) & ~empty()",
+        root = root.commit_id
+    );
+
+    let dangerous = list_commit_ids(runner, &revset)
+        .context("inspect ancestry below owned stack root for un-merged commits")?;
+    if let Some(parent) = dangerous.first() {
+        // Keep the diagnosis in the message (not `.reason()`): when this bubbles
+        // through `phase_error` the message becomes the displayed reason, so a
+        // separate `.reason()` would be dropped.
+        bail!(
+            CliError::new(format!(
+                "owned stack root {} is based on un-merged commit {} which is not a frozen dependency; forklift would otherwise silently base the bottom PR on trunk and drop the intervening un-merged commits",
+                change_label(root),
+                short_commit_id(parent)
+            ))
+            .resolution(
+                "run `forklift get <pr>` to depend on its PR, or rebase onto trunk if it has already merged"
+            )
+        );
+    }
+
+    Ok(())
+}
+
 pub(crate) fn selected_parent<'a>(
     change: &'a ResolvedChange,
     selected_commits: &HashSet<&'a str>,
