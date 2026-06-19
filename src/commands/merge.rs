@@ -46,7 +46,7 @@ pub(crate) fn run(
                 submit_before_retrying_merge(
                     runner,
                     &config,
-                    &merge_revset.revset,
+                    options.target.as_deref(),
                     &submit_required,
                     diagnostics,
                 )?;

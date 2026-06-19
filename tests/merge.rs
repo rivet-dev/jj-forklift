@@ -193,6 +193,36 @@ fn merge_sync_rebases_submits_then_merges_target() -> anyhow::Result<()> {
 }
 
 #[test]
+fn merge_runs_sync_submit_when_unsubmitted_stack_is_behind_trunk() -> anyhow::Result<()> {
+    // The user's report: an unsubmitted stack based on a stale trunk. The old
+    // recovery ran a bare submit, which cannot rebase, so it dead-ended at
+    // submit base validation ("run `forklift sync`"). Merge must instead carry
+    // the user through the whole sync+submit system on the first invocation.
+    let repo = TestRepo::new("merge-unsubmitted-behind-trunk")?;
+    repo.init_main()?;
+    let change = repo.create_change("change", "change title", "change body")?;
+    let branch = branch_for("change-title", &change.change_id);
+    // Seed the PR number the fake gh will mint when sync submits the stack.
+    repo.seed_pr_number(&branch, 77)?;
+    // Advance the remote trunk past the stack's base without rebasing it, so the
+    // stack must be synced (rebased) before it can be submitted and merged.
+    repo.advance_remote_trunk("remote work", &change.change_id)?;
+
+    let output = repo.run_tty_with_stdin(&["merge", "--admin"], "y\n")?;
+    assert_success("merge --admin on unsubmitted behind-trunk stack", &output);
+
+    // The pty harness folds stderr into the combined `stdout` stream.
+    let stdout = stdout_of(&output);
+    assert!(
+        stdout.contains("Merge needs the stack synced and submitted before it can continue."),
+        "merge should announce the sync+submit recovery, output:\n{stdout}"
+    );
+    // A single `forklift merge` synced, submitted, and landed the stack.
+    assert_eq!(repo.stored_pr(77)?["state"], json!("MERGED"));
+    Ok(())
+}
+
+#[test]
 fn clean_two_pr_merge_fast_forwards_trunk_and_merges_by_reachability() -> anyhow::Result<()> {
     let repo = TestRepo::new("merge-two-clean")?;
     repo.init_main()?;
@@ -498,8 +528,8 @@ fn merge_rewritten_local_change_points_to_submit() -> anyhow::Result<()> {
         "stderr:\n{stderr}"
     );
     assert!(
-        stderr.contains("resolution:\n  run `forklift submit --yes`, then `forklift merge`"),
-        "expected submit confirmation guidance, stderr:\n{stderr}"
+        stderr.contains("resolution:\n  run `forklift merge --sync`"),
+        "expected sync+submit recovery guidance, stderr:\n{stderr}"
     );
     assert!(
         !stderr.contains("resolution:\n  run `forklift submit --dry-run`"),
@@ -530,12 +560,12 @@ fn merge_unsubmitted_single_change_points_to_submit() -> anyhow::Result<()> {
         "stderr:\n{stderr}"
     );
     assert!(
-        stderr.contains("resolution:\n  run `forklift submit --yes`, then `forklift merge`"),
+        stderr.contains("resolution:\n  run `forklift merge --sync`"),
         "stderr:\n{stderr}"
     );
     assert!(
         !stderr.contains("resolution:\n  run `forklift submit --dry-run`"),
-        "single local-only merge should point to submit, not dry-run, stderr:\n{stderr}"
+        "single local-only merge should point to sync+submit, not dry-run, stderr:\n{stderr}"
     );
     Ok(())
 }
@@ -570,12 +600,12 @@ fn merge_unsubmitted_child_explains_local_only_change() -> anyhow::Result<()> {
     );
     assert!(
         stderr.contains("merge can only verify submitted changes")
-            && stderr.contains("resolution:\n  run `forklift submit --yes`, then `forklift merge`"),
+            && stderr.contains("resolution:\n  run `forklift merge --sync`"),
         "stderr:\n{stderr}"
     );
     assert!(
         !stderr.contains("resolution:\n  run `forklift submit --dry-run`"),
-        "local-only merge should point to submit, not dry-run, stderr:\n{stderr}"
+        "local-only merge should point to sync+submit, not dry-run, stderr:\n{stderr}"
     );
     assert_ne!(repo.stored_pr(32)?["state"], json!("MERGED"));
     Ok(())

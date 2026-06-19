@@ -230,70 +230,25 @@ pub(crate) fn confirm_submit_stack(yes: bool, yes_command: &str) -> Result<()> {
         .into())
 }
 
-pub(crate) fn submit_before_retrying_merge(
-    runner: &impl CommandRunner,
-    config: &AppConfig,
-    revset: &str,
-    submit_required: &MergeSubmitRequired,
-    diagnostics: Diagnostics,
-) -> Result<()> {
-    if !io::stdin().is_terminal() {
-        let diagnostic = submit_required.cli_error();
-        return Err(CliError::new(diagnostic.message)
-            .reason(diagnostic.reason.unwrap_or_else(|| {
-                "merge found local changes that have not been submitted".to_owned()
-            }))
-            .resolution("run `forklift submit --yes`, then `forklift merge`")
-            .into());
-    }
-
-    tracing::debug!(
-        reason = %submit_required.reason,
-        resolution = %submit_required.resolution,
-        "merge requires submit before retry"
-    );
-    eprintln!("Merge needs the stack submitted before it can continue.");
-
-    diagnostics.phase("merge-submit");
-    let context = resolve_stack_context(runner, revset)
-        .map_err(|error| phase_error("resolve-stack", revset, error))?;
-    submit_stack(
-        runner,
-        config,
-        &context,
-        false,
-        "forklift submit --yes",
-        diagnostics,
-    )?;
-    Ok(())
-}
-
-pub(crate) fn sync_submit_before_retrying_merge(
+/// Prompt the user, then run a full sync + submit (fetch, rebase onto trunk,
+/// submit) before merge retries.
+///
+/// Shared by both the submit-required and sync-required recovery paths. A bare
+/// submit cannot land a stack whose root is based on a stale trunk — submit's
+/// base validation refuses it ("base `main` is not an ancestor of the stack
+/// root") — so both paths route through sync, which fetches and rebases the
+/// stack onto trunk first and *then* submits. This lets a single `forklift
+/// merge` carry the user through the whole sync+submit system instead of failing
+/// with a "run sync yourself" hint.
+fn prompt_then_sync_submit_before_merge(
     runner: &impl CommandRunner,
     config: &AppConfig,
     target: Option<&str>,
-    sync_required: &MergeSyncRequired,
+    announce: &str,
     diagnostics: Diagnostics,
 ) -> Result<()> {
-    if !io::stdin().is_terminal() {
-        let diagnostic = sync_required.cli_error();
-        return Err(CliError::new(diagnostic.message)
-            .reason(
-                diagnostic
-                    .reason
-                    .unwrap_or_else(|| "merge found a stack that is not synced".to_owned()),
-            )
-            .resolution(format!("run `{}`", merge_sync_command(target)))
-            .into());
-    }
-
-    tracing::debug!(
-        reason = %sync_required.reason,
-        resolution = %sync_required.resolution,
-        "merge requires sync and submit before retry"
-    );
     let command = merge_sync_command(target);
-    eprintln!("Merge needs sync and submit before it can continue.");
+    eprintln!("{announce}");
     eprint!("Run `{command}` now? [y/N] ");
     io::stderr().flush().context("flush merge sync prompt")?;
     let mut answer = String::new();
@@ -320,6 +275,70 @@ pub(crate) fn sync_submit_before_retrying_merge(
         diagnostics,
     )?;
     Ok(())
+}
+
+pub(crate) fn submit_before_retrying_merge(
+    runner: &impl CommandRunner,
+    config: &AppConfig,
+    target: Option<&str>,
+    submit_required: &MergeSubmitRequired,
+    diagnostics: Diagnostics,
+) -> Result<()> {
+    if !io::stdin().is_terminal() {
+        let diagnostic = submit_required.cli_error();
+        return Err(CliError::new(diagnostic.message)
+            .reason(diagnostic.reason.unwrap_or_else(|| {
+                "merge found local changes that have not been submitted".to_owned()
+            }))
+            .resolution(format!("run `{}`", merge_sync_command(target)))
+            .into());
+    }
+
+    tracing::debug!(
+        reason = %submit_required.reason,
+        resolution = %submit_required.resolution,
+        "merge requires sync and submit before retry"
+    );
+    prompt_then_sync_submit_before_merge(
+        runner,
+        config,
+        target,
+        "Merge needs the stack synced and submitted before it can continue.",
+        diagnostics,
+    )
+}
+
+pub(crate) fn sync_submit_before_retrying_merge(
+    runner: &impl CommandRunner,
+    config: &AppConfig,
+    target: Option<&str>,
+    sync_required: &MergeSyncRequired,
+    diagnostics: Diagnostics,
+) -> Result<()> {
+    if !io::stdin().is_terminal() {
+        let diagnostic = sync_required.cli_error();
+        return Err(CliError::new(diagnostic.message)
+            .reason(
+                diagnostic
+                    .reason
+                    .unwrap_or_else(|| "merge found a stack that is not synced".to_owned()),
+            )
+            .resolution(format!("run `{}`", merge_sync_command(target)))
+            .into());
+    }
+
+    tracing::debug!(
+        reason = %sync_required.reason,
+        resolution = %sync_required.resolution,
+        "merge requires sync and submit before retry"
+    );
+    prompt_then_sync_submit_before_merge(
+        runner,
+        config,
+        target,
+        "Merge needs sync and submit before it can continue.",
+        diagnostics,
+    )
 }
 
 pub(crate) fn unfreeze_before_retrying_merge(
