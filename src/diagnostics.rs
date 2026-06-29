@@ -61,9 +61,11 @@ impl Diagnostics {
             ui_progress(
                 action.progress_verb(),
                 &format!(
-                    "PR #{} {} - {}",
-                    entry.pr_number,
-                    github_pr_url(repo, entry.pr_number),
+                    "PR {} `{}`",
+                    ui_hyperlink(
+                        &github_pr_url(repo, entry.pr_number),
+                        &format!("#{}", entry.pr_number)
+                    ),
                     change.title
                 ),
             );

@@ -55,6 +55,18 @@ pub(super) fn ui_progress(verb: &str, message: &str) {
     }
 }
 
+/// Wraps `text` in an OSC 8 terminal hyperlink pointing at `url`, so capable
+/// terminals render `text` as a clickable link to the full URL without showing
+/// it inline. When rich output is disabled (`NO_COLOR`, piped output) it falls
+/// back to plain `text`.
+pub(super) fn ui_hyperlink(url: &str, text: &str) -> String {
+    if ui_color_enabled() {
+        format!("\x1b]8;;{url}\x1b\\{text}\x1b]8;;\x1b\\")
+    } else {
+        text.to_owned()
+    }
+}
+
 /// Emits a red `error:` line to stderr for a human-readable failure headline.
 #[allow(dead_code)]
 pub(super) fn ui_error(message: &str) {
