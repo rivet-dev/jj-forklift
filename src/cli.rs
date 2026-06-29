@@ -12,7 +12,7 @@ pub(crate) struct Cli {
     #[arg(short, long, global = true)]
     pub(crate) verbose: bool,
 
-    #[arg(long, global = true)]
+    #[arg(short = 'n', long, global = true)]
     pub(crate) dry_run: bool,
 
     #[command(subcommand)]
@@ -69,12 +69,23 @@ pub(crate) struct SyncOptions {
     pub(crate) target: Option<String>,
 
     /// Also run submit after syncing. Sync does not submit by default.
-    #[arg(long)]
+    #[arg(short, long)]
     pub(crate) submit: bool,
 
     /// Apply submit without prompting for confirmation when --submit is used.
     #[arg(short, long)]
     pub(crate) yes: bool,
+
+    /// Only sync the stack containing the working copy (`@`). Without this,
+    /// `forklift sync` with no target syncs every tracked stack.
+    #[arg(short, long)]
+    pub(crate) current: bool,
+
+    /// Adopt every frozen dependency (`forklift unfreeze`) before rebasing, so
+    /// the entire stack — including imported upstream work — is rebased onto
+    /// trunk. Use when an unrelated stack landed and the whole chain must move.
+    #[arg(short, long)]
+    pub(crate) unfreeze: bool,
 }
 
 #[derive(Debug, Args)]
@@ -82,17 +93,17 @@ pub(crate) struct MergeOptions {
     pub(crate) target: Option<String>,
 
     /// Run sync with submit before merging, using the same optional target.
-    #[arg(long)]
+    #[arg(short, long)]
     pub(crate) sync: bool,
 
     /// Merge even if a PR is not approved, overriding the require-approval check.
-    #[arg(long)]
+    #[arg(short = 'A', long)]
     pub(crate) no_require_approval: bool,
 
     /// Admin override: skip the pre-flight mergeability gate (approval, blocked
     /// status, status checks) so the fast-forward push proceeds anyway. Implies
     /// --no-require-approval. Requires admin rights to push to a protected trunk.
-    #[arg(long)]
+    #[arg(short, long)]
     pub(crate) admin: bool,
 }
 
@@ -101,7 +112,7 @@ pub(crate) struct GetOptions {
     pub(crate) target: String,
 
     /// Do not move the working copy to a new editable change after fetching.
-    #[arg(long)]
+    #[arg(short = 'E', long)]
     pub(crate) no_edit: bool,
 }
 
@@ -134,7 +145,7 @@ pub(crate) struct PrOptions {
 
 #[derive(Debug, Args)]
 pub(crate) struct StatusOptions {
-    #[arg(long)]
+    #[arg(short, long)]
     pub(crate) json: bool,
 }
 
@@ -146,7 +157,7 @@ pub(crate) struct UiOptions {
 
     /// Show every revision instead of only tracked stacks (lets `jjui` use its
     /// own default revset).
-    #[arg(long)]
+    #[arg(short, long)]
     pub(crate) all: bool,
 
     /// Extra arguments forwarded verbatim to `jjui`.

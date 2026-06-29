@@ -51,6 +51,31 @@ pub(crate) struct SyncSummary {
     pub(crate) conflicts: usize,
 }
 
+/// Aggregate of syncing every tracked stack in one `forklift sync` invocation.
+/// `stacks` is the number of distinct tracked stacks that were synced; the
+/// remaining counters sum the per-stack [`SyncSummary`] values.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct SyncAllSummary {
+    pub(crate) stacks: usize,
+    /// Tracked stacks whose sync errored and were skipped (best-effort).
+    pub(crate) failed: usize,
+    pub(crate) rebased_roots: usize,
+    pub(crate) submit_ran: bool,
+    pub(crate) cleaned_branches: usize,
+    pub(crate) pruned_duplicates: usize,
+    pub(crate) conflicts: usize,
+}
+
+impl SyncAllSummary {
+    pub(crate) fn add(&mut self, summary: &SyncSummary) {
+        self.rebased_roots += summary.rebased_roots;
+        self.submit_ran |= summary.submit_ran;
+        self.cleaned_branches += summary.cleaned_branches;
+        self.pruned_duplicates += summary.pruned_duplicates;
+        self.conflicts += summary.conflicts;
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct MergeSummary {
     pub(crate) checked_prs: usize,
