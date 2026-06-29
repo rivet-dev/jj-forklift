@@ -950,13 +950,63 @@ pub(crate) fn cleanup_landed_branches(
 
     let github = GitHubContext::resolve(runner)
         .context("resolve GitHub repository for merged-branch cleanup")?;
-    Ok(cleanup_merged_branches(
-        runner,
-        config,
-        &github,
-        &landed,
-        diagnostics,
-    ))
+    let cleaned = cleanup_merged_branches(runner, config, &github, &landed, diagnostics);
+    Ok(cleaned + cleanup_landed_conflicted_bookmarks(runner, config, diagnostics)?)
+}
+
+/// Prune conflicted `<prefix>/*` bookmarks whose named change has already landed
+/// in trunk. A squash/abandon can collapse several stack bookmarks onto one
+/// surviving commit, leaving each conflicted and mis-pointed; once the change in
+/// the bookmark's name is an ancestor of trunk the bookmark is pure residue.
+/// Purely local and best-effort — the merged remote branch is already gone, and
+/// each deletion is undoable via `jj op undo`.
+#[tracing::instrument(skip_all)]
+pub(crate) fn cleanup_landed_conflicted_bookmarks(
+    runner: &impl CommandRunner,
+    config: &AppConfig,
+    diagnostics: Diagnostics,
+) -> Result<usize> {
+    let conflicted = conflicted_local_stack_bookmarks(runner, config)?;
+    let mut cleaned = 0;
+    for branch in conflicted {
+        let Some(change_prefix) = stack_bookmark_change_id_prefix(&branch) else {
+            continue;
+        };
+        if !change_landed_in_trunk(runner, change_prefix)? {
+            continue;
+        }
+        if diagnostics.dry_run {
+            diagnostics
+                .plan_line(&format!("- delete landed conflicted bookmark `{branch}` locally"));
+            cleaned += 1;
+            continue;
+        }
+        match delete_bookmark(runner, &branch, diagnostics) {
+            Ok(()) => {
+                cleaned += 1;
+                // Drop any dangling tracking ref too, without touching the remote.
+                forget_bookmark_tracking(runner, &branch, diagnostics);
+            }
+            Err(error) => diagnostics.warn(format!(
+                "could not delete conflicted bookmark `{branch}`: {error:#}"
+            )),
+        }
+    }
+    Ok(cleaned)
+}
+
+/// True when any visible copy of `change_id_prefix` is an ancestor of trunk
+/// (i.e. the change merged). A prefix that no longer resolves is treated as
+/// not-landed so cleanup leaves the bookmark untouched.
+#[tracing::instrument(level = "trace", skip_all)]
+fn change_landed_in_trunk(runner: &impl CommandRunner, change_id_prefix: &str) -> Result<bool> {
+    let revset = format!("change_id({change_id_prefix}) & ::trunk()");
+    let args = ["log", "--no-graph", "-r", &revset, "-T", "\"x\\n\""];
+    let output = runner.run("jj", &args)?;
+    if !output.success {
+        return Ok(false);
+    }
+    Ok(output.stdout.lines().any(|line| !line.trim().is_empty()))
 }
 
 /// Republish the PRs left above a targeted merge.

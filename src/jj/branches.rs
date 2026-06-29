@@ -42,6 +42,15 @@ pub(crate) fn deterministic_head_branch(
     find_unused_head_branch(&base, used_branches)
 }
 
+/// The change-id prefix encoded in the tail of a stack head branch name. The
+/// name shape is `<branch_prefix>/<slug>-<change_id_prefix>` and the slug itself
+/// can contain hyphens, so the change id is the final `-`-delimited segment.
+/// Returns `None` for a name with no tail segment.
+#[tracing::instrument(level = "trace", skip_all)]
+pub(crate) fn stack_bookmark_change_id_prefix(name: &str) -> Option<&str> {
+    name.rsplit('-').next().filter(|tail| !tail.is_empty())
+}
+
 #[tracing::instrument(level = "trace", skip_all)]
 pub(crate) fn change_id_branch_prefix(change_id: &str) -> &str {
     change_id
