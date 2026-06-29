@@ -1,9 +1,11 @@
 use super::super::*;
 
-/// Result of adopting an existing branch + PR into forklift's tracked set.
+/// Result of adopting an existing branch into forklift's tracked set. When the
+/// branch had an open PR, `pr_number` is set and the PR is bound via the cache;
+/// otherwise the branch was adopted locally only and `pr_number` is `None`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TrackOutcome {
-    pub(crate) pr_number: u64,
+    pub(crate) pr_number: Option<u64>,
     pub(crate) head_branch: String,
     pub(crate) change_id: String,
     pub(crate) commit_id: String,
@@ -12,11 +14,12 @@ pub(crate) struct TrackOutcome {
     pub(crate) outside_current_stack: bool,
 }
 
-/// Adopt the branch behind an existing open PR into forklift: point the local
-/// `<head_branch>` bookmark at the PR's head commit, track it against the
-/// remote, and write the `pr_cache` row binding the change to that PR. After
-/// this, `forklift submit`/`sync` update the existing PR instead of opening a
-/// new one. This is forklift's analogue of `gt track`.
+/// Adopt an existing branch into forklift's tracked set. If the target resolves
+/// to an open PR, bind that PR (set its head bookmark, track the remote, write
+/// the `pr_cache` row) so submit/sync update it instead of opening a new one —
+/// forklift's analogue of `gt track`. If no PR matches a branch target, fall
+/// back to adopting the branch locally so it is still tracked; a later submit
+/// opens the PR.
 #[tracing::instrument(skip_all, fields(target = target))]
 pub(crate) fn track_target(
     runner: &impl CommandRunner,
@@ -31,9 +34,28 @@ pub(crate) fn track_target(
     github.repo = parsed.repo().to_owned();
 
     diagnostics.phase("resolve-pr");
-    let pr = resolve_target_pr(runner, &github, parsed, "track")
-        .map_err(|error| phase_error("resolve-pr", target, error))?;
+    match resolve_target_pr(runner, &github, parsed.clone(), "track") {
+        Ok(pr) => adopt_open_pr(runner, config, &github, pr, diagnostics),
+        // A PR number that doesn't resolve is a hard error; a branch/change that
+        // has no open PR falls back to local-only tracking.
+        Err(pr_error) => match parsed {
+            GetTarget::BranchOrChange { value, .. } => {
+                track_branch_locally(runner, config, &value, diagnostics)
+            }
+            GetTarget::PullRequest { .. } => Err(phase_error("resolve-pr", target, pr_error)),
+        },
+    }
+}
 
+/// Bind an open PR: set its head bookmark on the PR head commit, track the
+/// remote, and record the cache row so submit updates this PR.
+fn adopt_open_pr(
+    runner: &impl CommandRunner,
+    config: &AppConfig,
+    github: &GitHubContext,
+    pr: GhPr,
+    diagnostics: Diagnostics,
+) -> Result<TrackOutcome> {
     if pr.merged || !pr.state.eq_ignore_ascii_case("open") {
         bail!(
             CliError::new(format!(
@@ -102,12 +124,85 @@ pub(crate) fn track_target(
     let outside_current_stack = !commit_is_in_current_stack(runner, &commit_id)?;
 
     Ok(TrackOutcome {
-        pr_number,
+        pr_number: Some(pr_number),
         head_branch,
         change_id,
         commit_id,
         outside_current_stack,
     })
+}
+
+/// Adopt a branch that has no open PR: point its local bookmark at the branch
+/// commit and track the remote if one exists. No cache row is written (there is
+/// no PR yet); a later `forklift submit` opens the PR. The target must name an
+/// existing local or remote branch — a bare change id has no branch to track.
+fn track_branch_locally(
+    runner: &impl CommandRunner,
+    config: &AppConfig,
+    branch: &str,
+    diagnostics: Diagnostics,
+) -> Result<TrackOutcome> {
+    if branch.is_empty() || branch.starts_with('-') {
+        bail!(CliError::new(format!("`{branch}` is not a usable branch name")));
+    }
+
+    diagnostics.phase("resolve-branch");
+    let commit_id = if bookmark_exists(runner, branch)? {
+        jj_ref_commit_id(runner, branch)
+            .map_err(|error| phase_error("resolve-branch", branch, error))?
+    } else if remote_bookmark_status(runner, config, branch).is_ok() {
+        jj_ref_commit_id(runner, &format!("{branch}@{}", config.remote))
+            .map_err(|error| phase_error("resolve-branch", branch, error))?
+    } else {
+        bail!(
+            CliError::new(format!(
+                "no open PR for `{branch}`, and no local or remote branch by that name"
+            ))
+            .resolution(
+                "pass an open PR (number, URL, or its head branch), or create the bookmark first"
+            )
+        );
+    };
+    let change_id = jj_ref_change_id(runner, &commit_id)
+        .map_err(|error| phase_error("resolve-branch", branch, error))?;
+
+    diagnostics.phase("set-bookmark");
+    set_local_bookmark(runner, branch, &commit_id, diagnostics)
+        .map_err(|error| phase_error("set-bookmark", branch, error))?;
+
+    // Track the remote branch if one exists; a purely local branch has nothing
+    // to track yet and submit will push it.
+    diagnostics.phase("track-remote");
+    if let Ok(status) = remote_bookmark_status(runner, config, branch) {
+        if !status.tracked && !diagnostics.dry_run {
+            track_remote_bookmark(runner, config, branch, diagnostics)
+                .map_err(|error| phase_error("track-remote", branch, error))?;
+        }
+    }
+
+    // No cache row is written: the bookmark we just set on the commit is the
+    // durable record that submit reads. The cache stays a best-effort PR-metadata
+    // store, never a correctness gate.
+    let outside_current_stack = !commit_is_in_current_stack(runner, &commit_id)?;
+
+    Ok(TrackOutcome {
+        pr_number: None,
+        head_branch: branch.to_owned(),
+        change_id,
+        commit_id,
+        outside_current_stack,
+    })
+}
+
+/// True when a local bookmark named `name` exists (including a conflicted one).
+fn bookmark_exists(runner: &impl CommandRunner, name: &str) -> Result<bool> {
+    let revset = format!("bookmarks(exact:'{name}')");
+    let args = ["log", "--no-graph", "-r", &revset, "-T", "\"x\\n\""];
+    let output = runner.run("jj", &args)?;
+    if !output.success {
+        return Ok(false);
+    }
+    Ok(output.stdout.lines().any(|line| !line.trim().is_empty()))
 }
 
 /// Point a local bookmark at `commit_id`, creating it or moving it if it already

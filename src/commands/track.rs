@@ -11,23 +11,30 @@ pub(crate) fn run(
 ) -> Result<()> {
     let outcome = track_target(runner, config, &options.target, diagnostics)?;
 
-    let verb = if dry_run { "track (dry run) — would adopt" } else { "track — adopted" };
-    ui_progress(
-        "Finished",
-        &format!(
-            "{verb} PR #{} as `{}` ({})",
-            outcome.pr_number,
+    let prefix = if dry_run { "track (dry run) — would adopt" } else { "track — adopted" };
+    let summary = match outcome.pr_number {
+        Some(number) => format!(
+            "{prefix} PR #{number} as `{}` ({})",
             outcome.head_branch,
             short_change_id(&outcome.change_id),
         ),
-    );
+        None => format!(
+            "{prefix} branch `{}` locally ({}) — no open PR; run `forklift submit` to open one",
+            outcome.head_branch,
+            short_change_id(&outcome.change_id),
+        ),
+    };
+    ui_progress("Finished", &summary);
     if outcome.outside_current_stack {
+        let tail = match outcome.pr_number {
+            Some(number) => format!("update PR #{number}"),
+            None => "submit it".to_owned(),
+        };
         ui_progress(
             "Note",
             &format!(
-                "{} is not in the current stack (trunk()..@); `forklift submit`/`sync` will update PR #{} once @ moves onto it",
+                "{} is not in the current stack (trunk()..@); `forklift submit`/`sync` will {tail} once @ moves onto it",
                 short_commit_id(&outcome.commit_id),
-                outcome.pr_number,
             ),
         );
     }

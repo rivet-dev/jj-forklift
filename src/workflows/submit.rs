@@ -97,6 +97,22 @@ pub(crate) fn resolve_submit_head_branch(
         return Ok(discovered);
     }
 
+    // A branch the user adopted with `forklift track <branch>` lives as a real
+    // local bookmark on the change's commit — the durable source of truth, no
+    // cache required. Prefer it as the PR head over a generated `stack/*` name.
+    if let Some(adopted) = adopted_head_bookmark_for_change(runner, config, change)? {
+        if !used_head_branches.contains(&adopted) {
+            return resolve_submit_pending_head_branch(
+                runner,
+                config,
+                used_head_branches,
+                &context.github,
+                change,
+                &adopted,
+            );
+        }
+    }
+
     if let Some(entry) = store.get_pr(&context.github.repo, &change.change_id) {
         let head_branch = entry.head_branch.clone();
         match resolve_submit_cached_head_branch(
@@ -161,6 +177,33 @@ pub(crate) fn resolve_submit_cached_head_branch(
     let expected_remote_head = remote_head_oid(runner, &config.remote, &head_branch)?;
     used_head_branches.insert(head_branch.clone());
     Ok((head_branch, Some(existing_pr), expected_remote_head))
+}
+
+/// Resolve the head branch for a change whose head is an adopted bookmark
+/// (`forklift track <branch>`). Use that branch as the head: adopt an open PR if
+/// one now exists, otherwise return it for the create path. Unlike the
+/// deterministic path, an existing remote branch is not treated as a collision —
+/// it is the user's deliberately tracked branch.
+#[tracing::instrument(skip_all, fields(change = %change.change_id))]
+pub(crate) fn resolve_submit_pending_head_branch(
+    runner: &impl CommandRunner,
+    config: &AppConfig,
+    used_head_branches: &mut HashSet<String>,
+    github: &GitHubContext,
+    change: &ResolvedChange,
+    head_branch: &str,
+) -> Result<(String, Option<PrCacheEntry>, Option<String>)> {
+    if used_head_branches.contains(head_branch) {
+        bail!("cache records duplicate head branch `{head_branch}` in stack");
+    }
+    let existing_pr =
+        lookup_open_pr_by_head_branch(runner, github, &change.change_id, head_branch)?;
+    if let Some(existing_pr) = &existing_pr {
+        validate_submit_bookmark_state(runner, config, change, existing_pr)?;
+    }
+    let expected_remote_head = remote_head_oid(runner, &config.remote, head_branch)?;
+    used_head_branches.insert(head_branch.to_owned());
+    Ok((head_branch.to_owned(), existing_pr, expected_remote_head))
 }
 
 #[tracing::instrument(skip_all, fields(change = %change.change_id))]
@@ -319,6 +362,65 @@ pub(crate) fn local_stack_bookmarks_for_change(
     bookmarks.sort();
     bookmarks.dedup();
     Ok(bookmarks)
+}
+
+/// A head branch the user adopted with `forklift track <branch>`: a local,
+/// non-conflicted bookmark on the change's commit that is *not* a generated
+/// `stack/*` name, the trunk, or a frozen dependency. This reads jj's bookmarks
+/// directly, so submit honors a tracked branch without depending on the cache.
+/// Returns `None` unless there is exactly one such candidate (an ambiguous set
+/// falls back to the deterministic name rather than guessing).
+#[tracing::instrument(skip_all, fields(change = %change.change_id))]
+pub(crate) fn adopted_head_bookmark_for_change(
+    runner: &impl CommandRunner,
+    config: &AppConfig,
+    change: &ResolvedChange,
+) -> Result<Option<String>> {
+    let args = [
+        "bookmark",
+        "list",
+        "--revision",
+        change.commit_id.as_str(),
+        "-T",
+        LOCAL_BOOKMARK_TEMPLATE,
+    ];
+    let output = runner.run("jj", &args)?;
+    if !output.success {
+        bail!(
+            "failed-command=`{}` error={}",
+            display_command("jj", &args),
+            output.stderr.trim()
+        );
+    }
+
+    let stack_prefix = format!("{}/", config.branch_prefix.trim_end_matches('/'));
+    let mut candidates = output
+        .stdout
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split('\t');
+            let name = fields.next()?.trim();
+            let remote = fields.next().unwrap_or_default().trim();
+            let status = fields.next().unwrap_or_default().trim();
+            let target = fields.next().unwrap_or_default().trim();
+            if !remote.is_empty()
+                || status == "conflicted"
+                || !is_resolvable_bookmark_target(target)
+                || name == config.trunk
+                || name.starts_with(&stack_prefix)
+                || name.starts_with("forklift/frozen/")
+            {
+                return None;
+            }
+            Some(name.to_owned())
+        })
+        .collect::<Vec<_>>();
+    candidates.sort();
+    candidates.dedup();
+    match candidates.as_slice() {
+        [only] => Ok(Some(only.clone())),
+        _ => Ok(None),
+    }
 }
 
 pub(crate) fn submit_stack(
