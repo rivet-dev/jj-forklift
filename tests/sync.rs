@@ -735,3 +735,42 @@ fn sync_prunes_landed_conflicted_stack_bookmark_but_keeps_unlanded() -> anyhow::
     );
     Ok(())
 }
+
+#[test]
+fn sync_resolves_chain_across_multi_commit_frozen_pr() -> anyhow::Result<()> {
+    let repo = TestRepo::new("sync-multi-commit-frozen")?;
+    repo.init_main()?;
+
+    // Upstream stack: PR #11 (one commit) then PR #12 which spans TWO commits
+    // (change 2 + change 3), so its frozen head is a grandchild of #11's head.
+    let stack = repo.create_linear_stack(3)?;
+    let bottom = branch_for("change-1-title", &stack[0].change_id);
+    let top = branch_for("change-3-title", &stack[2].change_id);
+    repo.set_bookmark(&bottom, &stack[0].commit_id)?;
+    repo.set_bookmark(&top, &stack[2].commit_id)?;
+    repo.push_bookmark(&bottom)?;
+    repo.push_bookmark(&top)?;
+    repo.seed_pr(11, &bottom, "main", "change 1 title", "change 1 body")?;
+    repo.seed_pr(12, &top, &bottom, "change 3 title", "change 3 body")?;
+    repo.set_bookmark("forklift/frozen/pr-11", &stack[0].commit_id)?;
+    repo.set_bookmark("forklift/frozen/pr-12", &stack[2].commit_id)?;
+
+    // Owned work stacked on the frozen head.
+    repo.jj(&["new", &stack[2].commit_id])?;
+    repo.create_change("mine", "mine title", "mine body")?;
+
+    // Before the ancestry fix this failed: the chain stopped at #12 (its direct
+    // parent is #12's own intra-PR commit, not #11), so #12 looked like the
+    // bottom with an unexpected base.
+    let output = repo.run(&["sync"])?;
+    assert_success("sync across multi-commit frozen PR", &output);
+    assert_eq!(
+        repo.bookmark_target("forklift/frozen/pr-11")?,
+        stack[0].commit_id
+    );
+    assert_eq!(
+        repo.bookmark_target("forklift/frozen/pr-12")?,
+        stack[2].commit_id
+    );
+    Ok(())
+}
