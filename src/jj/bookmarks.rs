@@ -152,7 +152,7 @@ pub(crate) fn resolve_stack_resolution(
         Vec::new()
     } else {
         let frozen_changes = resolve_frozen_changes(runner, frozen_bookmarks)?;
-        frozen_dependencies_below_owned(&owned, frozen_changes)?
+        frozen_dependencies_below_owned(runner, &owned, frozen_changes)?
     };
     let resolution = StackResolution {
         owned,
@@ -176,7 +176,7 @@ pub(crate) fn resolve_purely_frozen_stack(
         resolve_single_rev(runner, "@").context("resolve current revision for frozen sync")?;
     let frozen_changes = resolve_frozen_changes(runner, frozen_bookmarks)?;
     if let Some(frozen_dependencies) =
-        frozen_dependency_chain_ending_at(&frozen_changes, &at_commit)?
+        frozen_dependency_chain_ending_at(runner, &frozen_changes, &at_commit)?
     {
         return Ok(StackResolution {
             owned: Vec::new(),
@@ -189,7 +189,7 @@ pub(crate) fn resolve_purely_frozen_stack(
         if current.empty {
             if let [parent] = current.parent_ids.as_slice() {
                 if let Some(frozen_dependencies) =
-                    frozen_dependency_chain_ending_at(&frozen_changes, parent)?
+                    frozen_dependency_chain_ending_at(runner, &frozen_changes, parent)?
                 {
                     return Ok(StackResolution {
                         owned: Vec::new(),
@@ -248,9 +248,67 @@ pub(crate) fn resolve_frozen_changes(
 
 #[tracing::instrument(skip_all, fields(top_commit = %top_commit))]
 pub(crate) fn frozen_dependency_chain_ending_at(
+    runner: &impl CommandRunner,
     frozen: &[FrozenDependency],
     top_commit: &str,
 ) -> Result<Option<Vec<FrozenDependency>>> {
+    let by_commit = frozen_by_commit(frozen)?;
+
+    let Some(mut current) = by_commit.get(top_commit).copied() else {
+        return Ok(None);
+    };
+    let commit_ids = frozen
+        .iter()
+        .map(|dependency| dependency.change.commit_id.as_str())
+        .collect::<Vec<_>>();
+    let mut seen = HashSet::new();
+    let mut top_down = Vec::new();
+    loop {
+        if !seen.insert(current.change.commit_id.as_str()) {
+            bail!(CliError::new(format!(
+                "frozen dependency graph has a cycle at bookmark `{}`",
+                current.bookmark.name
+            )));
+        }
+        top_down.push(current);
+        // The next dependency below is the nearest *frozen ancestor*, not the
+        // immediate parent: a multi-commit PR puts its own intra-PR commits
+        // between its frozen head and the next PR's head.
+        let frozen_parents = nearest_frozen_ancestors(runner, &commit_ids, &current.change.commit_id)?;
+        match frozen_parents.as_slice() {
+            [] => break,
+            [parent] => {
+                current = by_commit.get(parent.as_str()).copied().with_context(|| {
+                    format!("frozen ancestor {} missing from dependency set", short_commit_id(parent))
+                })?;
+            }
+            parents => {
+                let labels = parents
+                    .iter()
+                    .filter_map(|commit| by_commit.get(commit.as_str()).copied())
+                    .map(|dependency| {
+                        format!("`{}` at {}", dependency.bookmark.name, change_label(&dependency.change))
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                bail!(
+                    CliError::new(format!(
+                        "frozen bookmark `{}` has {} frozen ancestors, expected a linear chain",
+                        current.bookmark.name,
+                        parents.len()
+                    ))
+                    .reason(labels)
+                );
+            }
+        }
+    }
+
+    Ok(Some(top_down.into_iter().rev().cloned().collect()))
+}
+
+/// Index frozen dependencies by their commit id, rejecting two bookmarks on the
+/// same commit.
+fn frozen_by_commit(frozen: &[FrozenDependency]) -> Result<HashMap<&str, &FrozenDependency>> {
     let mut by_commit: HashMap<&str, &FrozenDependency> = HashMap::new();
     for dependency in frozen {
         if let Some(existing) = by_commit.insert(&dependency.change.commit_id, dependency) {
@@ -262,41 +320,45 @@ pub(crate) fn frozen_dependency_chain_ending_at(
             )));
         }
     }
+    Ok(by_commit)
+}
 
-    let Some(mut current) = by_commit.get(top_commit).copied() else {
-        return Ok(None);
-    };
-    let mut seen = HashSet::new();
-    let mut top_down = Vec::new();
-    loop {
-        if !seen.insert(current.change.commit_id.as_str()) {
-            bail!(CliError::new(format!(
-                "frozen dependency graph has a cycle at bookmark `{}`",
-                current.bookmark.name
-            )));
-        }
-        top_down.push(current);
-        let frozen_parents = current
-            .change
-            .parent_ids
-            .iter()
-            .filter_map(|parent_id| by_commit.get(parent_id.as_str()).copied())
-            .collect::<Vec<_>>();
-        match frozen_parents.as_slice() {
-            [] => break,
-            [parent] => current = *parent,
-            parents => bail!(CliError::new(format!(
-                "frozen bookmark `{}` has {} frozen parents, expected a linear chain",
-                current.bookmark.name,
-                parents.len()
-            ))),
-        }
+/// Commit ids of the nearest frozen commit(s) that are strict ancestors of
+/// `head`. More than one means the frozen graph branches below `head` (not a
+/// linear chain); none means `head` is the bottom of the frozen stack. Walking
+/// by ancestry — rather than the immediate parent — bridges the intra-PR commits
+/// of a multi-commit frozen PR.
+fn nearest_frozen_ancestors(
+    runner: &impl CommandRunner,
+    frozen_commit_ids: &[&str],
+    head: &str,
+) -> Result<Vec<String>> {
+    let set = frozen_commit_ids
+        .iter()
+        .map(|commit| format!("present({commit})"))
+        .collect::<Vec<_>>()
+        .join(" | ");
+    let revset = format!("heads(({set}) & ::{head} & ~{head})");
+    let args = ["log", "--no-graph", "-r", &revset, "-T", "commit_id ++ \"\\n\""];
+    let output = runner.run("jj", &args)?;
+    if !output.success {
+        bail!(
+            "failed-command=`{}` error={}",
+            display_command("jj", &args),
+            output.stderr.trim()
+        );
     }
-
-    Ok(Some(top_down.into_iter().rev().cloned().collect()))
+    Ok(output
+        .stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect())
 }
 
 pub(crate) fn frozen_dependencies_below_owned(
+    runner: &impl CommandRunner,
     owned: &[ResolvedChange],
     frozen: Vec<FrozenDependency>,
 ) -> Result<Vec<FrozenDependency>> {
@@ -304,17 +366,8 @@ pub(crate) fn frozen_dependencies_below_owned(
         return Ok(Vec::new());
     }
 
-    let mut by_commit: HashMap<&str, &FrozenDependency> = HashMap::new();
-    for dependency in &frozen {
-        if let Some(existing) = by_commit.insert(&dependency.change.commit_id, dependency) {
-            bail!(CliError::new(format!(
-                "multiple frozen bookmarks point at commit {}: `{}` and `{}`",
-                short_commit_id(&dependency.change.commit_id),
-                existing.bookmark.name,
-                dependency.bookmark.name
-            )));
-        }
-    }
+    // Validate up front: no two frozen bookmarks on one commit.
+    frozen_by_commit(&frozen)?;
 
     let selected_commits = owned
         .iter()
@@ -337,83 +390,49 @@ pub(crate) fn frozen_dependencies_below_owned(
         );
     };
 
-    let nearest = root
-        .parent_ids
+    // The frozen boundary below the owned root is its nearest frozen ancestor —
+    // found by ancestry so a multi-commit frozen PR (whose head is several
+    // commits above its own base) is still recognized as the boundary.
+    let commit_ids = frozen
         .iter()
-        .filter_map(|parent_id| by_commit.get(parent_id.as_str()).copied())
+        .map(|dependency| dependency.change.commit_id.as_str())
         .collect::<Vec<_>>();
-    let [nearest] = nearest.as_slice() else {
-        if nearest.is_empty() {
-            return Ok(Vec::new());
+    let nearest = nearest_frozen_ancestors(runner, &commit_ids, &root.commit_id)?;
+    let boundary = match nearest.as_slice() {
+        [] => return Ok(Vec::new()),
+        [boundary] => boundary.clone(),
+        boundaries => {
+            let by_commit = frozen_by_commit(&frozen)?;
+            let boundary_labels = boundaries
+                .iter()
+                .filter_map(|commit| by_commit.get(commit.as_str()).copied())
+                .map(|dependency| {
+                    format!(
+                        "`{}` at {}",
+                        dependency.bookmark.name,
+                        change_label(&dependency.change)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            bail!(
+                CliError::new(format!(
+                    "multiple frozen boundaries below owned root {} ({})",
+                    short_change_id(&root.change_id),
+                    boundaries.len()
+                ))
+                .reason(boundary_labels)
+                .resolution("run `forklift sync` from a single linear stack")
+            );
         }
-        let boundary_labels = nearest
-            .iter()
-            .map(|dependency| {
-                format!(
-                    "`{}` at {}",
-                    dependency.bookmark.name,
-                    change_label(&dependency.change)
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        bail!(
-            CliError::new(format!(
-                "multiple frozen boundaries below owned root {} ({})",
-                short_change_id(&root.change_id),
-                nearest.len()
-            ))
-            .reason(boundary_labels.clone())
-            .resolution("run `forklift sync` from a single linear stack")
-        );
     };
 
-    let mut seen = HashSet::new();
-    let mut top_down = Vec::new();
-    let mut current = *nearest;
-    loop {
-        if !seen.insert(current.change.commit_id.as_str()) {
-            bail!(CliError::new(format!(
-                "frozen dependency graph has a cycle at bookmark `{}`",
-                current.bookmark.name
-            )));
-        }
-        top_down.push(current);
-
-        let frozen_parents = current
-            .change
-            .parent_ids
-            .iter()
-            .filter_map(|parent_id| by_commit.get(parent_id.as_str()).copied())
-            .collect::<Vec<_>>();
-        match frozen_parents.as_slice() {
-            [] => break,
-            [parent] => current = *parent,
-            parents => {
-                let parent_labels = parents
-                    .iter()
-                    .map(|dependency| {
-                        format!(
-                            "`{}` at {}",
-                            dependency.bookmark.name,
-                            change_label(&dependency.change)
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                bail!(
-                    CliError::new(format!(
-                        "frozen bookmark `{}` has {} frozen parents, expected a linear chain",
-                        current.bookmark.name,
-                        parents.len()
-                    ))
-                    .reason(parent_labels.clone())
-                )
-            }
-        }
-    }
-
-    Ok(top_down.into_iter().rev().cloned().collect())
+    frozen_dependency_chain_ending_at(runner, &frozen, &boundary)?.with_context(|| {
+        format!(
+            "frozen boundary {} resolved no dependency chain",
+            short_commit_id(&boundary)
+        )
+    })
 }
 
 #[tracing::instrument(skip_all, fields(branch = %branch))]
