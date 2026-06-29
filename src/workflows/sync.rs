@@ -1,6 +1,125 @@
 use super::super::*;
 use super::*;
 
+/// Sync every tracked stack in one pass: each distinct head among the working
+/// copy's stack and all local `<prefix>/*` head bookmarks is synced through the
+/// same per-stack pipeline as a targeted sync. This is the `forklift` analogue
+/// of `gt sync` operating over all tracked branches rather than just the one
+/// containing `@`.
+#[tracing::instrument(skip_all)]
+pub(crate) fn sync_all_stacks(
+    runner: &impl CommandRunner,
+    config: &AppConfig,
+    submit: bool,
+    yes: bool,
+    diagnostics: Diagnostics,
+) -> Result<SyncAllSummary> {
+    let heads = tracked_stack_heads(runner, config)
+        .map_err(|error| phase_error("resolve-stacks", "tracked stacks", error))?;
+
+    // No tracked stack sits above trunk (e.g. an empty `@` on trunk). Fall back
+    // to the default single-stack sync, which still advances trunk and finishes
+    // cleanly instead of erroring on an empty stack.
+    if heads.is_empty() {
+        let summary = sync_stack(
+            runner,
+            config,
+            DEFAULT_STACK_REVSET,
+            None,
+            submit,
+            yes,
+            diagnostics,
+        )?;
+        let mut aggregate = SyncAllSummary::default();
+        aggregate.add(&summary);
+        return Ok(aggregate);
+    }
+
+    // Best-effort only matters when there is more than one stack: a single bad
+    // stack should surface its real error directly (rich refusal/divergence
+    // guidance), while with several stacks one failure must not abort the rest.
+    let mut aggregate = SyncAllSummary::default();
+    let total = heads.len();
+    let best_effort = total > 1;
+    for (index, head) in heads.iter().enumerate() {
+        ui_progress(
+            "Syncing",
+            &format!("stack {}/{} ({})", index + 1, total, short_change_id(head)),
+        );
+        // Anchor the per-stack revset at this head's change id, which follows
+        // the rewrite when sync rebases the stack (a commit id would go stale
+        // mid-sync, breaking the submit phase). A divergent change id fails to
+        // resolve here; jj's own error then explains how to abandon the extra
+        // copy. We don't try to auto-resolve divergence.
+        let revset = merge_revset_for_target(head);
+        match sync_stack(runner, config, &revset, None, submit, yes, diagnostics) {
+            Ok(summary) => {
+                aggregate.add(&summary);
+                aggregate.stacks += 1;
+            }
+            Err(error) if best_effort => {
+                aggregate.failed += 1;
+                let diagnostic = diagnostic_from_error(&error);
+                ui_warn!(
+                    "stack {} failed to sync: {}",
+                    short_change_id(head),
+                    diagnostic.message
+                );
+                // Surface the underlying cause (e.g. jj's divergence hints with
+                // the change offsets and `jj abandon` command) indented beneath.
+                if let Some(reason) = &diagnostic.reason {
+                    for line in reason.lines() {
+                        ui_detail_line(line);
+                    }
+                }
+                if let Some(resolution) = &diagnostic.resolution {
+                    ui_detail_line(&format!("resolution: {resolution}"));
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(aggregate)
+}
+
+/// Change ids of the head of every tracked stack: the maximal mutable,
+/// non-empty owned commits reachable from the working copy or any local
+/// `<prefix>/*` bookmark. Frozen dependency bookmarks are intentionally excluded
+/// — they are immutable inputs handled within each owning stack's sync. Change
+/// ids (not commit ids) anchor each stack so the revset survives the rebase that
+/// sync performs on it. Duplicates (e.g. a divergent change surfacing twice) are
+/// removed so each stack is attempted once.
+#[tracing::instrument(skip_all)]
+pub(crate) fn tracked_stack_heads(
+    runner: &impl CommandRunner,
+    config: &AppConfig,
+) -> Result<Vec<String>> {
+    let prefix = config.branch_prefix.trim_end_matches('/');
+    let revset = format!(
+        "heads((trunk()..(@ | bookmarks(glob:'{prefix}/*'))) & ~empty() & ~::(immutable_heads() | root()))"
+    );
+    let template = "json(change_id) ++ \"\\n\"";
+    let args = ["log", "--no-graph", "-r", &revset, "-T", template];
+    let output = runner.run("jj", &args)?;
+    if !output.success {
+        bail!(
+            "failed-command=`{}` error={}",
+            display_command("jj", &args),
+            output.stderr.trim()
+        );
+    }
+    let mut heads = Vec::new();
+    let mut seen = HashSet::new();
+    for line in output.stdout.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        let change_id = serde_json::from_str::<String>(line)
+            .with_context(|| format!("parse change id from `{line}`"))?;
+        if seen.insert(change_id.clone()) {
+            heads.push(change_id);
+        }
+    }
+    Ok(heads)
+}
+
 pub(crate) fn sync_stack(
     runner: &impl CommandRunner,
     config: &AppConfig,

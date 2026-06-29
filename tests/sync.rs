@@ -96,7 +96,7 @@ fn sync_reports_rebase_conflicts() -> anyhow::Result<()> {
         "stderr:\n{stderr}"
     );
     assert!(
-        stderr.contains("Finished sync — 1 roots rebased, 1 conflict(s), submit skipped"),
+        stderr.contains("Finished sync — 1 stack(s), 1 roots rebased, 1 conflict(s), submit skipped"),
         "stderr:\n{stderr}"
     );
     assert_eq!(repo.git_remote_branch_target("main")?, remote.commit_id);
@@ -224,7 +224,7 @@ fn sync_from_empty_child_above_frozen_pr_succeeds() -> anyhow::Result<()> {
     assert_success("sync", &output);
     let stderr = stderr_of(&output);
     assert!(
-        stderr.contains("Finished sync — 0 roots rebased"),
+        stderr.contains("Finished sync — 0 stack(s), 0 roots rebased"),
         "stderr:\n{stderr}"
     );
     assert_eq!(
@@ -507,6 +507,185 @@ fn sync_refuses_to_rebase_onto_trunk_past_unmerged_parent() -> anyhow::Result<()
     assert!(
         !combined.contains("rebase stack root") && !combined.contains("-d main"),
         "sync must not plan a rebase onto trunk\noutput:\n{combined}"
+    );
+    Ok(())
+}
+
+#[test]
+fn sync_with_no_target_rebases_all_tracked_stacks() -> anyhow::Result<()> {
+    let repo = TestRepo::new("sync-all-stacks")?;
+    repo.init_main()?;
+
+    // Stack A rooted at trunk, submitted so it carries a `stack/*` bookmark.
+    let a = repo.create_change("a", "a title", "a body")?;
+    let branch_a = branch_for("a-title", &a.change_id);
+    repo.seed_pr_number(&branch_a, 11)?;
+    assert_success("submit A", &repo.run(&["submit", "--yes"])?);
+
+    // Stack B is a sibling rooted at trunk, also submitted.
+    repo.jj(&["new", "main"])?;
+    let b = repo.create_change("b", "b title", "b body")?;
+    let branch_b = branch_for("b-title", &b.change_id);
+    repo.seed_pr_number(&branch_b, 12)?;
+    assert_success("submit B", &repo.run(&["submit", "--yes"])?);
+
+    // Remote trunk advances; both stacks are now behind.
+    let advanced = repo.advance_remote_trunk("remote work", &b.change_id)?;
+
+    // `forklift sync` with no target rebases BOTH tracked stacks onto new trunk.
+    let output = repo.run(&["sync"])?;
+    assert_success("sync", &output);
+
+    for change in [&a, &b] {
+        let rebased = repo.change_at(&change.change_id)?;
+        let parent = repo.rev_commit_id(&format!("{}-", rebased.commit_id))?;
+        assert_eq!(
+            parent, advanced.commit_id,
+            "stack {} should sit on the new trunk",
+            change.change_id
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn sync_current_only_rebases_the_working_copy_stack() -> anyhow::Result<()> {
+    let repo = TestRepo::new("sync-current-only")?;
+    repo.init_main()?;
+
+    let a = repo.create_change("a", "a title", "a body")?;
+    let branch_a = branch_for("a-title", &a.change_id);
+    repo.seed_pr_number(&branch_a, 11)?;
+    assert_success("submit A", &repo.run(&["submit", "--yes"])?);
+
+    repo.jj(&["new", "main"])?;
+    let b = repo.create_change("b", "b title", "b body")?;
+    let branch_b = branch_for("b-title", &b.change_id);
+    repo.seed_pr_number(&branch_b, 12)?;
+    assert_success("submit B", &repo.run(&["submit", "--yes"])?);
+
+    // Remote trunk advances; @ is on stack B after the advance restore.
+    let advanced = repo.advance_remote_trunk("remote work", &b.change_id)?;
+
+    // `--current` syncs only the stack containing @ (B), leaving A behind.
+    let output = repo.run(&["sync", "--current"])?;
+    assert_success("sync --current", &output);
+
+    let rebased_b = repo.change_at(&b.change_id)?;
+    let parent_b = repo.rev_commit_id(&format!("{}-", rebased_b.commit_id))?;
+    assert_eq!(parent_b, advanced.commit_id, "B should sit on new trunk");
+
+    let untouched_a = repo.change_at(&a.change_id)?;
+    let parent_a = repo.rev_commit_id(&format!("{}-", untouched_a.commit_id))?;
+    assert_ne!(
+        parent_a, advanced.commit_id,
+        "A should NOT be rebased when --current is used"
+    );
+    Ok(())
+}
+
+#[test]
+fn sync_unfreeze_rebases_frozen_dependency_onto_new_trunk() -> anyhow::Result<()> {
+    let repo = TestRepo::new("sync-unfreeze-deps")?;
+    repo.init_main()?;
+
+    // A frozen upstream dependency (a teammate's imported PR) at the base.
+    let dep = repo.create_change("dep", "dep title", "dep body")?;
+    let dep_branch = branch_for("dep-title", &dep.change_id);
+    repo.set_bookmark(&dep_branch, &dep.commit_id)?;
+    repo.push_bookmark(&dep_branch)?;
+    repo.seed_pr(11, &dep_branch, "main", "dep title", "dep body")?;
+    repo.set_bookmark("forklift/frozen/pr-11", &dep.commit_id)?;
+
+    // Your own change stacked on top of the frozen dependency.
+    let mine = repo.create_change("mine", "mine title", "mine body")?;
+
+    // An unrelated stack lands: remote trunk advances. @ is restored onto `mine`.
+    let advanced = repo.advance_remote_trunk("unrelated landed", &mine.change_id)?;
+
+    // `sync --unfreeze` adopts the dependency, then rebases the WHOLE chain
+    // (dependency + your work) onto the new trunk.
+    let output = repo.run(&["sync", "--unfreeze"])?;
+    assert_success("sync --unfreeze", &output);
+
+    assert!(
+        !repo.bookmark_exists("forklift/frozen/pr-11")?,
+        "frozen bookmark should be removed after --unfreeze"
+    );
+
+    // The former-frozen dependency now sits directly on the advanced trunk.
+    let rebased_dep = repo.change_at(&dep.change_id)?;
+    let dep_parent = repo.rev_commit_id(&format!("{}-", rebased_dep.commit_id))?;
+    assert_eq!(
+        dep_parent, advanced.commit_id,
+        "the adopted dependency should be rebased onto the new trunk"
+    );
+
+    // And your work still sits on top of the dependency.
+    let rebased_mine = repo.change_at(&mine.change_id)?;
+    let mine_parent = repo.rev_commit_id(&format!("{}-", rebased_mine.commit_id))?;
+    assert_eq!(
+        mine_parent, rebased_dep.commit_id,
+        "your change should stay stacked on the dependency"
+    );
+    Ok(())
+}
+
+#[test]
+fn sync_is_best_effort_across_stacks_when_one_fails() -> anyhow::Result<()> {
+    let repo = TestRepo::new("sync-best-effort")?;
+    repo.init_main()?;
+
+    // Healthy stack A: submitted, will fall behind trunk and need a rebase.
+    let a = repo.create_change("a", "a title", "a body")?;
+    let branch_a = branch_for("a-title", &a.change_id);
+    repo.seed_pr_number(&branch_a, 9)?;
+    assert_success("submit A", &repo.run(&["submit", "--yes"])?);
+
+    // Broken stack B: child rooted on an un-merged, un-frozen open PR, which
+    // sync refuses to rebase past.
+    repo.jj(&["new", "main"])?;
+    let parent = repo.create_change("parent", "parent title", "parent body")?;
+    let parent_branch = branch_for("parent-title", &parent.change_id);
+    repo.set_bookmark(&parent_branch, &parent.commit_id)?;
+    repo.push_bookmark(&parent_branch)?;
+    repo.seed_pr(11, &parent_branch, "main", "parent title", "parent body")?;
+    repo.jj(&["bookmark", "untrack", &format!("{parent_branch}@origin")])?;
+    let child = repo.create_change("child", "child title", "child body")?;
+
+    let advanced = repo.advance_remote_trunk("unrelated landed", &child.change_id)?;
+
+    let output = repo.run(&["sync"])?;
+    // The broken stack makes the overall run exit non-zero...
+    assert!(
+        !output.status.success(),
+        "sync should report failure when a tracked stack fails"
+    );
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("failed to sync") && stderr.contains("tracked stack(s) failed to sync"),
+        "stderr should surface the per-stack failure and tally:\n{stderr}"
+    );
+    // The underlying cause is printed indented under the warning, not swallowed.
+    assert!(
+        stderr.contains("un-merged commit") && stderr.contains("not a frozen dependency"),
+        "the failing stack's detailed reason should be shown under the warning:\n{stderr}"
+    );
+
+    // ...but the healthy stack A was still rebased onto the new trunk.
+    let rebased_a = repo.change_at(&a.change_id)?;
+    let parent_a = repo.rev_commit_id(&format!("{}-", rebased_a.commit_id))?;
+    assert_eq!(
+        parent_a, advanced.commit_id,
+        "healthy stack A should be rebased despite the other stack failing"
+    );
+
+    // The broken stack B was left untouched (not rebased onto trunk).
+    let child_after = repo.change_at(&child.change_id)?;
+    let parent_child = repo.rev_commit_id(&format!("{}-", child_after.commit_id))?;
+    assert_ne!(
+        parent_child, advanced.commit_id,
+        "broken stack B must not be rebased onto trunk"
     );
     Ok(())
 }
