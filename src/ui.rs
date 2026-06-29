@@ -93,6 +93,18 @@ pub(super) fn ui_warn_line(message: &str) {
     }
 }
 
+/// Emits a continuation line aligned under a status message (e.g. the body of a
+/// `Warning`), indented to the gutter width + 1 so it lines up beneath the
+/// message column. Dimmed so it reads as secondary detail.
+pub(super) fn ui_detail_line(message: &str) {
+    let indent = " ".repeat(PROGRESS_VERB_WIDTH + 1);
+    if ui_color_enabled() {
+        eprintln!("{indent}{}", message.dimmed());
+    } else {
+        eprintln!("{indent}{message}");
+    }
+}
+
 pub(super) fn ui_conflict(message: &str) {
     let padded = format!("{:>width$}", "Conflict", width = PROGRESS_VERB_WIDTH);
     if ui_color_enabled() {
