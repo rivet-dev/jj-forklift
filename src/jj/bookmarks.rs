@@ -669,6 +669,45 @@ pub(crate) fn push_bookmark_deletions(
     Ok(())
 }
 
+/// Local `<prefix>/*` bookmarks that are in a conflicted state. Unlike
+/// [`local_stack_bookmarks`], which deliberately skips conflicted bookmarks,
+/// this returns exactly those so cleanup can prune the ones whose change has
+/// already landed (a common residue of a squash/abandon collapsing several
+/// bookmarks onto one surviving commit).
+pub(crate) fn conflicted_local_stack_bookmarks(
+    runner: &impl CommandRunner,
+    config: &AppConfig,
+) -> Result<Vec<String>> {
+    let args = ["bookmark", "list", "-T", LOCAL_BOOKMARK_TEMPLATE];
+    let output = runner.run("jj", &args)?;
+    if !output.success {
+        bail!(
+            "failed-command=`{}` error={}",
+            display_command("jj", &args),
+            output.stderr.trim()
+        );
+    }
+
+    let prefix = format!("{}/", config.branch_prefix.trim_end_matches('/'));
+    let mut bookmarks = output
+        .stdout
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split('\t');
+            let name = fields.next()?.trim();
+            let remote = fields.next().unwrap_or_default().trim();
+            let status = fields.next().unwrap_or_default().trim();
+            if !remote.is_empty() || !name.starts_with(&prefix) || status != "conflicted" {
+                return None;
+            }
+            Some(name.to_owned())
+        })
+        .collect::<Vec<_>>();
+    bookmarks.sort();
+    bookmarks.dedup();
+    Ok(bookmarks)
+}
+
 /// List every resolvable local bookmark name, regardless of prefix or target.
 pub(crate) fn local_bookmark_names(runner: &impl CommandRunner) -> Result<Vec<String>> {
     let args = ["bookmark", "list", "-T", LOCAL_BOOKMARK_TEMPLATE];

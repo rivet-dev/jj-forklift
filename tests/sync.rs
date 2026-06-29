@@ -689,3 +689,49 @@ fn sync_is_best_effort_across_stacks_when_one_fails() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn sync_prunes_landed_conflicted_stack_bookmark_but_keeps_unlanded() -> anyhow::Result<()> {
+    let repo = TestRepo::new("sync-prune-conflicted")?;
+    let main0 = repo.init_main()?;
+
+    // Change F, then land it by moving trunk onto it.
+    let feat = repo.create_change("feature", "feature title", "feature body")?;
+    let feat_branch = branch_for("feature-title", &feat.change_id);
+    repo.set_bookmark("main", &feat.commit_id)?;
+    repo.push_bookmark("main")?;
+
+    // Change G stacked above the new trunk — NOT landed.
+    let g = repo.create_change("other", "other title", "other body")?;
+    let g_branch = branch_for("other-title", &g.change_id);
+
+    // Make both stack bookmarks conflicted via two concurrent `bookmark create`
+    // ops pointing at different commits (mirrors a squash/abandon collapse).
+    for (name, a, b) in [
+        (&feat_branch, &feat.commit_id, &main0.commit_id),
+        (&g_branch, &g.commit_id, &feat.commit_id),
+    ] {
+        let base = repo.current_operation_id()?;
+        repo.jj(&["bookmark", "create", name, "-r", a])?;
+        repo.jj(&["--at-op", &base, "bookmark", "create", name, "-r", b])?;
+        repo.jj(&["log", "-r", "@", "-T", "commit_id"])?; // force op merge
+    }
+    assert!(repo.bookmark_exists(&feat_branch)?, "feature bookmark seeded");
+    assert!(repo.bookmark_exists(&g_branch)?, "other bookmark seeded");
+
+    let output = repo.run(&["sync"])?;
+    assert_success("sync", &output);
+
+    // The landed change's conflicted bookmark is pruned as residue...
+    assert!(
+        !repo.bookmark_exists(&feat_branch)?,
+        "landed conflicted bookmark should be cleaned up:\n{}",
+        stderr_of(&output)
+    );
+    // ...but the un-landed change's conflicted bookmark is left for the user.
+    assert!(
+        repo.bookmark_exists(&g_branch)?,
+        "un-landed conflicted bookmark must be preserved"
+    );
+    Ok(())
+}
