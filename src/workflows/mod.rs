@@ -4,6 +4,7 @@ pub(super) mod repair;
 pub(super) mod status;
 pub(super) mod submit;
 pub(super) mod sync;
+pub(super) mod track;
 pub(super) mod types;
 pub(super) mod unfreeze;
 
@@ -13,5 +14,6 @@ pub(crate) use repair::*;
 pub(crate) use status::*;
 pub(crate) use submit::*;
 pub(crate) use sync::*;
+pub(crate) use track::*;
 pub(crate) use types::*;
 pub(crate) use unfreeze::*;
