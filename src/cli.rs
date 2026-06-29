@@ -30,6 +30,11 @@ pub(crate) enum Commands {
     Status(StatusOptions),
     /// Open a pull request in your browser.
     Pr(PrOptions),
+    /// Open the `jjui` terminal UI, filtered to tracked stacks by default.
+    Ui(UiOptions),
+    /// Any other subcommand is passed straight through to `jj`.
+    #[command(external_subcommand)]
+    External(Vec<String>),
 }
 
 impl Commands {
@@ -43,6 +48,8 @@ impl Commands {
             Self::Unfreeze(_) => "unfreeze",
             Self::Status(_) => "status",
             Self::Pr(_) => "pr",
+            Self::Ui(_) => "ui",
+            Self::External(_) => "jj",
         }
     }
 }
@@ -120,4 +127,20 @@ pub(crate) struct PrOptions {
 pub(crate) struct StatusOptions {
     #[arg(long)]
     pub(crate) json: bool,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct UiOptions {
+    /// Override the default revset filter. Defaults to the tracked-stacks view.
+    #[arg(short = 'r', long)]
+    pub(crate) revset: Option<String>,
+
+    /// Show every revision instead of only tracked stacks (lets `jjui` use its
+    /// own default revset).
+    #[arg(long)]
+    pub(crate) all: bool,
+
+    /// Extra arguments forwarded verbatim to `jjui`.
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    pub(crate) args: Vec<String>,
 }
