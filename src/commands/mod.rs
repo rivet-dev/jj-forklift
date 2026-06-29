@@ -5,4 +5,5 @@ pub(super) mod repair;
 pub(super) mod status;
 pub(super) mod submit;
 pub(super) mod sync;
+pub(super) mod ui;
 pub(super) mod unfreeze;

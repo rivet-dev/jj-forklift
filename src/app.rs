@@ -205,12 +205,17 @@ fn run(cli: Cli, runner: &impl CommandRunner) -> Result<()> {
         "command start"
     );
 
+    // A jj passthrough surfaces jj's own stderr; don't layer forklift's
+    // diagnostic block on top when the forwarded command exits non-zero.
+    let is_passthrough = matches!(cli.command, Commands::External(_));
     let result = run_command(cli, runner, &cwd);
     match &result {
         Ok(()) => tracing::debug!(command = command_name, "command complete"),
         Err(error) => {
             tracing::error!(command = command_name, error = %error, "command failed");
-            render_cli_error(error, trace_log.path());
+            if !is_passthrough {
+                render_cli_error(error, trace_log.path());
+            }
         }
     }
 
@@ -218,6 +223,14 @@ fn run(cli: Cli, runner: &impl CommandRunner) -> Result<()> {
 }
 
 fn run_command(cli: Cli, runner: &impl CommandRunner, cwd: &str) -> Result<()> {
+    // Unknown subcommands are forwarded straight to `jj`, like `gt` does for
+    // `git`. Skip forklift's config/startup preflight so the passthrough behaves
+    // exactly as if `jj` were invoked directly (jj prints its own errors).
+    if let Commands::External(args) = &cli.command {
+        let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+        return runner.run_interactive("jj", &borrowed);
+    }
+
     ensure_jj_repo(runner, cwd).map_err(|error| phase_error("preflight", "jj repo", error))?;
     let config = AppConfig::resolve(runner)
         .map_err(|error| phase_error("resolve-config", "configuration", error))?;
@@ -300,6 +313,15 @@ fn run_command(cli: Cli, runner: &impl CommandRunner, cwd: &str) -> Result<()> {
             cli.verbose,
             cli.dry_run,
         )?,
+        Commands::Ui(options) => commands::ui::run(
+            runner,
+            &config,
+            options,
+            diagnostics,
+            cli.verbose,
+            cli.dry_run,
+        )?,
+        Commands::External(_) => unreachable!("external subcommands are handled before dispatch"),
     }
 
     Ok(())
