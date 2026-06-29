@@ -454,7 +454,7 @@ pub(crate) fn submit_stack(
         );
         return Ok(summary);
     }
-    print_submit_action_plan(config, &plans);
+    print_submit_action_plan(&context.github.repo, &plans);
     confirm_submit_stack(yes, yes_command)?;
 
     // Anything that touches a file between planning and here — a build tool

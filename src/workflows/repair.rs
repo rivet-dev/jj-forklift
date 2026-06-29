@@ -140,12 +140,12 @@ pub(crate) fn repair_pr_list(numbers: &[u64]) -> String {
     }
 }
 
-pub(crate) fn print_submit_action_plan(config: &AppConfig, plans: &[SubmitPlan]) {
-    render_submit_action_plan(config, plans, print_submit_plan_line);
+pub(crate) fn print_submit_action_plan(repo: &str, plans: &[SubmitPlan]) {
+    render_submit_action_plan(repo, plans, print_submit_plan_line);
 }
 
 pub(crate) fn render_submit_action_plan(
-    config: &AppConfig,
+    repo: &str,
     plans: &[SubmitPlan],
     mut emit: impl FnMut(&str),
 ) {
@@ -155,7 +155,7 @@ pub(crate) fn render_submit_action_plan(
         emit(&format!(
             "  {}. {}",
             index + 1,
-            submit_action_description(config, plan)
+            submit_action_description(repo, plan)
         ));
     }
     if !plans.is_empty() {
@@ -167,28 +167,19 @@ pub(crate) fn render_submit_action_plan(
     emit("");
 }
 
-pub(crate) fn submit_action_description(config: &AppConfig, plan: &SubmitPlan) -> String {
-    let remote_branch = format!("{}/{}", config.remote, plan.head_branch);
-    let commit = short_commit_id(&plan.change.commit_id);
-    let branch_detail = if plan.push_needed {
-        format!("push {remote_branch} @ {commit}")
-    } else {
-        format!("{remote_branch} @ {commit}")
+pub(crate) fn submit_action_description(repo: &str, plan: &SubmitPlan) -> String {
+    let pr_ref = |pr_number: u64| {
+        ui_hyperlink(&github_pr_url(repo, pr_number), &format!("#{pr_number}"))
     };
 
     match &plan.existing_pr {
-        None => format!(
-            "create new PR `{}`: {}, base {}",
-            plan.change.title, branch_detail, plan.base_branch
-        ),
-        Some(existing) if plan.pr_update_needed => format!(
-            "update PR #{} `{}`: {}, base {}",
-            existing.pr_number, plan.change.title, branch_detail, plan.base_branch
-        ),
-        Some(existing) => format!(
-            "unchanged PR #{} `{}`: {}",
-            existing.pr_number, plan.change.title, branch_detail
-        ),
+        None => format!("create new PR `{}`", plan.change.title),
+        Some(existing) if plan.pr_update_needed => {
+            format!("update PR {} `{}`", pr_ref(existing.pr_number), plan.change.title)
+        }
+        Some(existing) => {
+            format!("unchanged PR {} `{}`", pr_ref(existing.pr_number), plan.change.title)
+        }
     }
 }
 
@@ -416,7 +407,9 @@ pub(crate) fn submit_action_label_end(action_line: &str) -> Option<usize> {
     if action_line.starts_with("create new PR") {
         return Some("create new PR".len());
     }
-    for marker in [" PR #", " stack comments"] {
+    // Match " PR " rather than " PR #" so the action label still resolves when
+    // the PR number is wrapped in an OSC 8 hyperlink escape.
+    for marker in [" PR ", " stack comments"] {
         if let Some(index) = action_line.find(marker) {
             return Some(index);
         }
