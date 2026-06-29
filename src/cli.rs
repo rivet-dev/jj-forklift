@@ -28,6 +28,8 @@ pub(crate) enum Commands {
     Repair(RepairOptions),
     Unfreeze(UnfreezeOptions),
     Status(StatusOptions),
+    /// Adopt an existing branch and its open PR into forklift's tracked set.
+    Track(TrackOptions),
     /// Open a pull request in your browser.
     Pr(PrOptions),
     /// Open the `jjui` terminal UI, filtered to tracked stacks by default.
@@ -47,6 +49,7 @@ impl Commands {
             Self::Repair(_) => "repair",
             Self::Unfreeze(_) => "unfreeze",
             Self::Status(_) => "status",
+            Self::Track(_) => "track",
             Self::Pr(_) => "pr",
             Self::Ui(_) => "ui",
             Self::External(_) => "jj",
@@ -113,6 +116,12 @@ pub(crate) struct RepairOptions {
 
 #[derive(Debug, Args)]
 pub(crate) struct UnfreezeOptions {
+    pub(crate) target: String,
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct TrackOptions {
+    /// PR number, GitHub PR URL, branch name, or change id prefix to adopt.
     pub(crate) target: String,
 }
 

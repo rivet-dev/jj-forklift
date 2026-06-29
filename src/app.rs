@@ -305,6 +305,14 @@ fn run_command(cli: Cli, runner: &impl CommandRunner, cwd: &str) -> Result<()> {
             cli.verbose,
             cli.dry_run,
         )?,
+        Commands::Track(options) => commands::track::run(
+            runner,
+            &config,
+            options,
+            diagnostics,
+            cli.verbose,
+            cli.dry_run,
+        )?,
         Commands::Pr(options) => commands::pr::run(
             runner,
             &config,
