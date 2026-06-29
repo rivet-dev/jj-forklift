@@ -17,7 +17,7 @@ fn one_change_submit_creates_pr() -> anyhow::Result<()> {
     assert_success("submit", &output);
     assert!(
         stderr_of(&output)
-            .contains("Submitted PR #9 https://github.com/owner/repo/pull/9 - change title"),
+            .contains("Submitted PR #9 `change title`"),
         "stderr:\n{}",
         stderr_of(&output)
     );
@@ -126,7 +126,7 @@ fn submit_requires_confirmation_before_mutation() -> anyhow::Result<()> {
     let repo = TestRepo::new("submit-confirm")?;
     repo.init_main()?;
     let change = repo.create_change("change", "change title", "change body")?;
-    let branch = branch_for("change-title", &change.change_id);
+    let _branch = branch_for("change-title", &change.change_id);
 
     let output = repo.run(&["submit"])?;
     assert!(
@@ -135,10 +135,8 @@ fn submit_requires_confirmation_before_mutation() -> anyhow::Result<()> {
     );
     let stderr = stderr_of(&output);
     assert!(
-        stderr.contains(&format!(
-            "actions:\n  1. create new PR `change title`: push origin/{branch} @ {}, base main",
-            &change.commit_id[..8]
-        )) && stderr.contains("2. sync stack comments for submitted stack"),
+        stderr.contains("actions:\n  1. create new PR `change title`")
+            && stderr.contains("2. sync stack comments for submitted stack"),
         "stderr:\n{stderr}"
     );
     assert!(
@@ -240,14 +238,14 @@ fn two_change_update_keeps_top_pr_based_on_bottom_branch() -> anyhow::Result<()>
     assert_success("update submit", &output);
     assert!(
         stderr_of(&output).contains(
-            "Updated PR #11 https://github.com/owner/repo/pull/11 - change 1 title edited"
+            "Updated PR #11 `change 1 title edited`"
         ),
         "stderr:\n{}",
         stderr_of(&output)
     );
     assert!(
         stderr_of(&output)
-            .contains("Updated PR #12 https://github.com/owner/repo/pull/12 - change 2 title"),
+            .contains("Updated PR #12 `change 2 title`"),
         "stderr:\n{}",
         stderr_of(&output)
     );
@@ -282,7 +280,7 @@ fn noop_submit_skips_push_and_pr_mutation() -> anyhow::Result<()> {
     assert_success("noop submit", &output);
     assert!(
         stderr_of(&output)
-            .contains("Nothing PR #9 https://github.com/owner/repo/pull/9 - change title"),
+            .contains("Nothing PR #9 `change title`"),
         "stderr:\n{}",
         stderr_of(&output)
     );
