@@ -93,6 +93,39 @@ impl Diagnostics {
             return;
         }
 
+        // Dry runs render a compact, hierarchical preview: one line per change
+        // (the same concise action description submit prints on confirmation),
+        // with the concrete mutations nested beneath it. The exhaustive
+        // one-line-per-mutation dump is reserved for `--verbose`.
+        if self.dry_run {
+            self.plan_line("planned mutations:");
+            for plan in plans {
+                self.plan_line(&format!(
+                    "  {}",
+                    submit_action_description(&context.github.repo, plan)
+                ));
+                let mut details = Vec::new();
+                if plan.push_needed {
+                    details.push(format!("push {}", config.remote));
+                }
+                if plan.existing_pr.is_none() || plan.pr_update_needed {
+                    details.push(format!("base {}", plan.base_branch));
+                }
+                for (index, detail) in details.iter().enumerate() {
+                    let branch = if index + 1 == details.len() {
+                        "└─"
+                    } else {
+                        "├─"
+                    };
+                    self.plan_line(&format!("    {branch} {detail}"));
+                }
+            }
+        }
+
+        if !self.verbose {
+            return;
+        }
+
         self.plan_line("planned mutations:");
         for plan in plans {
             if plan.push_needed {
