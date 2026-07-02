@@ -1151,7 +1151,6 @@ pub(crate) fn stack_comment_body_with_frozen(
             &mut body,
             &context.github.repo,
             &change.title,
-            &change.change_id,
             entry,
             change.change_id == current_change_id,
         );
@@ -1170,7 +1169,6 @@ pub(crate) fn stack_comment_body_with_frozen(
                 &mut body,
                 &context.github.repo,
                 &dependency.change.title,
-                &dependency.change.change_id,
                 entry,
                 false,
             );
@@ -1188,6 +1186,10 @@ pub(crate) fn stack_comment_body_with_frozen(
         body.push_str(&format!(
             "Merge when ready: `forklift merge {}`\n",
             entry.pr_number
+        ));
+        body.push_str(&format!(
+            "\n<sub>change {}</sub>\n",
+            change_id_branch_prefix(current_change_id)
         ));
     }
 
@@ -1214,11 +1216,15 @@ pub(crate) fn repaired_stack_comment_body(
 
     body.push_str(&format!("- {trunk}\n"));
     body.push('\n');
-    if prs.iter().any(|pr| pr.number == current_pr_number) {
+    if let Some(current) = prs.iter().find(|pr| pr.number == current_pr_number) {
         body.push_str(&format!("Get stack: `forklift get {current_pr_number}`\n"));
         body.push_str("Push local edits: `forklift submit`\n");
         body.push_str(&format!(
             "Merge when ready: `forklift merge {current_pr_number}`\n"
+        ));
+        body.push_str(&format!(
+            "\n<sub>change {}</sub>\n",
+            stack_comment_change_hint(&current.head_ref_name)
         ));
     }
 
@@ -1233,9 +1239,9 @@ pub(crate) fn push_repaired_stack_comment_line(
     is_current: bool,
 ) {
     let label = format!(
-        "[{} #{}]({})",
-        markdown_link_label(&pr.title),
+        "[#{} {}]({})",
         pr.number,
+        markdown_link_label(&truncate_stack_title(&pr.title)),
         github_pr_url(repo, pr.number),
     );
     let label = if is_current {
@@ -1244,14 +1250,7 @@ pub(crate) fn push_repaired_stack_comment_line(
         label
     };
     let current_marker = if is_current { " 👈" } else { "" };
-    let created_date = created_date_fragment(&pr.created_at);
-    body.push_str(&format!(
-        "- {} _{}_{}{}\n",
-        label,
-        stack_comment_change_hint(&pr.head_ref_name),
-        created_date,
-        current_marker
-    ));
+    body.push_str(&format!("- {label}{current_marker}\n"));
 }
 
 #[tracing::instrument(level = "trace", skip_all)]
@@ -1266,19 +1265,18 @@ pub(crate) fn stack_comment_change_hint(head_branch: &str) -> String {
     }
 }
 
-#[tracing::instrument(level = "trace", skip_all, fields(change = %change_id))]
+#[tracing::instrument(level = "trace", skip_all)]
 pub(crate) fn push_stack_comment_line(
     body: &mut String,
     repo: &str,
     title: &str,
-    change_id: &str,
     entry: &PrCacheEntry,
     is_current: bool,
 ) {
     let label = format!(
-        "[{} #{}]({})",
-        markdown_link_label(title),
+        "[#{} {}]({})",
         entry.pr_number,
+        markdown_link_label(&truncate_stack_title(title)),
         github_pr_url(repo, entry.pr_number),
     );
     let label = if is_current {
@@ -1287,26 +1285,22 @@ pub(crate) fn push_stack_comment_line(
         label
     };
     let current_marker = if is_current { " 👈" } else { "" };
-    let created_date = created_date_fragment(&entry.created_at);
-    body.push_str(&format!(
-        "- {} _{}_{}{}\n",
-        label,
-        change_id_branch_prefix(change_id),
-        created_date,
-        current_marker
-    ));
+    body.push_str(&format!("- {label}{current_marker}\n"));
 }
 
+/// Longest PR title we render inline in a stack-comment line before eliding the
+/// tail with `…`. Keeps each line scannable instead of wrapping across the page.
+const STACK_TITLE_MAX_CHARS: usize = 60;
+
 #[tracing::instrument(level = "trace", skip_all)]
-pub(crate) fn created_date_fragment(created_at: &str) -> String {
-    // Render `YYYY-MM-DDTHH:MM:SSZ` as `YYYY-MM-DD HH:MM:SS`, falling back to
-    // whatever prefix is available.
-    let stamp = created_at.get(..19).unwrap_or(created_at).trim();
-    let stamp = stamp.replacen('T', " ", 1);
-    if stamp.is_empty() {
-        String::new()
+pub(crate) fn truncate_stack_title(title: &str) -> String {
+    let title = title.trim();
+    let mut chars = title.chars();
+    let head = chars.by_ref().take(STACK_TITLE_MAX_CHARS).collect::<String>();
+    if chars.next().is_some() {
+        format!("{} …", head.trim_end())
     } else {
-        format!(" · {stamp}")
+        head
     }
 }
 

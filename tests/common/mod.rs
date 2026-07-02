@@ -814,7 +814,7 @@ pub fn stack_comment_body(
 ) -> String {
     let mut body = "<!-- stack:v1 -->\nStack for owner/repo\n\n".to_owned();
     for (change_id, number, _, _, title) in rows.iter().rev() {
-        let label = format!("[{title} #{number}](https://github.com/owner/repo/pull/{number})");
+        let label = format!("[#{number} {title}](https://github.com/owner/repo/pull/{number})");
         let is_current = *change_id == current_change_id;
         let label = if is_current {
             format!("**{label}**")
@@ -822,20 +822,19 @@ pub fn stack_comment_body(
             label
         };
         let current_marker = if is_current { " 👈" } else { "" };
-        let short_change_id = change_id.chars().take(8).collect::<String>();
-        body.push_str(&format!(
-            "- {label} _{short_change_id}_ · 2026-06-03 12:34:56{current_marker}\n"
-        ));
+        body.push_str(&format!("- {label}{current_marker}\n"));
     }
     body.push_str("- main\n");
     body.push('\n');
-    if let Some((_, number, _, _, _)) = rows
+    if let Some((change_id, number, _, _, _)) = rows
         .iter()
         .find(|(change_id, _, _, _, _)| *change_id == current_change_id)
     {
         body.push_str(&format!("Get stack: `forklift get {number}`\n"));
         body.push_str("Push local edits: `forklift submit`\n");
         body.push_str(&format!("Merge when ready: `forklift merge {number}`\n"));
+        let short_change_id = change_id.chars().take(8).collect::<String>();
+        body.push_str(&format!("\n<sub>change {short_change_id}</sub>\n"));
     }
     body
 }
