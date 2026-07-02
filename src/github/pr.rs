@@ -702,7 +702,15 @@ pub(crate) async fn lookup_open_pr_by_head_branch(
     github: &GitHubContext,
     change_id: &str,
     head_branch: &str,
+    prefetch: Option<&HashMap<String, PrCacheEntry>>,
 ) -> Result<Option<PrCacheEntry>> {
+    // Planning prefetches the live metadata + stack-comment id for every cached
+    // PR concurrently. A hit here is authoritative (it already reflects an open
+    // PR); a miss falls through to the live per-branch lookup unchanged, so
+    // behavior is identical and only faster when the cache warmed the branch.
+    if let Some(entry) = prefetch.and_then(|map| map.get(head_branch)) {
+        return Ok(Some(entry.clone()));
+    }
     let args = [
         "pr",
         "list",

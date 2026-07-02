@@ -45,6 +45,12 @@ pub(crate) async fn status_report(
         .clone()
         .or_else(|| Some(config.trunk.clone()));
 
+    // Warm the per-change PR lookups concurrently, mirroring submit's planning.
+    // A prefetch failure is non-fatal for a read-only status: resolution just
+    // falls back to live calls.
+    let prefetch = build_planning_prefetch(runner, config, &context, &store, diagnostics)
+        .await
+        .unwrap_or_default();
     for change in &context.stack {
         let base_branch = previous_head_branch
             .clone()
@@ -57,6 +63,7 @@ pub(crate) async fn status_report(
             &context,
             change,
             &mut orphaned_prs,
+            &prefetch,
             diagnostics,
         )
         .await
