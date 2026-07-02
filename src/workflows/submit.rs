@@ -734,6 +734,7 @@ pub(crate) async fn submit_stack(
 
     diagnostics.print_submit_plan(config, context, &plans);
     if diagnostics.dry_run {
+        print_submit_action_plan(&context.github.repo, &plans);
         for orphan in &orphaned_prs {
             diagnostics.plan_line(&format!(
                 "- would offer to close orphaned PR #{} and delete branch {} (absorbed into {})",

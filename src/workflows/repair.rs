@@ -153,17 +153,22 @@ pub(crate) fn render_submit_action_plan(
 ) {
     emit("");
     emit("actions:");
+    // Right-align the action numbers so their periods and descriptions line up
+    // once the count crosses into double digits (`  9.` vs ` 10.`). The last
+    // number is the trailing sync-comments action, so its digit count sets the
+    // column width (`ilog10 + 1`, no allocation).
+    let width = (plans.len() + 1).ilog10() as usize + 1;
     for (index, plan) in plans.iter().enumerate() {
         emit(&format!(
-            "  {}. {}",
-            index + 1,
-            submit_action_description(repo, plan)
+            "  {number:>width$}. {}",
+            submit_action_description(repo, plan),
+            number = index + 1,
         ));
     }
     if !plans.is_empty() {
         emit(&format!(
-            "  {}. sync stack comments for submitted stack",
-            plans.len() + 1
+            "  {number:>width$}. sync stack comments for submitted stack",
+            number = plans.len() + 1,
         ));
     }
     emit("");

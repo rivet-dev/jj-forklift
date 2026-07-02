@@ -92,46 +92,10 @@ impl Diagnostics {
         context: &AppContext,
         plans: &[SubmitPlan],
     ) {
-        if !self.verbose && !self.dry_run {
-            return;
-        }
-
-        // Dry runs render a compact, hierarchical preview: one line per change
-        // (the same concise action description submit prints on confirmation),
-        // with the concrete mutations nested beneath it. The exhaustive
-        // one-line-per-mutation dump is reserved for `--verbose`.
-        if self.dry_run {
-            self.plan_body("planned mutations:", PlanLineStyle::Header);
-            for plan in plans {
-                let style = if plan.existing_pr.is_none() {
-                    PlanLineStyle::Create
-                } else if plan.pr_update_needed {
-                    PlanLineStyle::Update
-                } else {
-                    PlanLineStyle::Unchanged
-                };
-                self.plan_body(
-                    &format!("  {}", submit_action_description(&context.github.repo, plan)),
-                    style,
-                );
-                let mut details = Vec::new();
-                if plan.push_needed {
-                    details.push(format!("push {}", config.remote));
-                }
-                if plan.existing_pr.is_none() || plan.pr_update_needed {
-                    details.push(format!("base {}", plan.base_branch));
-                }
-                for (index, detail) in details.iter().enumerate() {
-                    let branch = if index + 1 == details.len() {
-                        "└─"
-                    } else {
-                        "├─"
-                    };
-                    self.plan_body(&format!("    {branch} {detail}"), PlanLineStyle::Detail);
-                }
-            }
-        }
-
+        // The default dry-run plan is rendered by the caller through the exact
+        // same `print_submit_action_plan` the confirmation prompt uses, so the
+        // two never diverge in numbering, indentation, or coloring. Only the
+        // exhaustive one-line-per-mutation dump lives here, gated on `--verbose`.
         if !self.verbose {
             return;
         }
@@ -219,19 +183,6 @@ impl Diagnostics {
     pub(super) fn plan_line(self, line: &str) {
         if self.dry_run {
             ui_info!("{line}");
-        } else if self.verbose {
-            tracing::debug!("{line}");
-        }
-    }
-
-    /// Like [`plan_line`], but for the structured plan body: aligned and colored
-    /// by `style` instead of carrying the repeated `Info` gutter. Used for the
-    /// hierarchical mutation preview so it reads cleanly and the same way across
-    /// commands.
-    #[tracing::instrument(level = "trace", skip_all)]
-    pub(super) fn plan_body(self, line: &str, style: PlanLineStyle) {
-        if self.dry_run {
-            ui_plan_line(line, style);
         } else if self.verbose {
             tracing::debug!("{line}");
         }
