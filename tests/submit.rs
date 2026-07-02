@@ -838,3 +838,34 @@ fn submit_refuses_when_owned_root_parent_is_unmerged_open_pr() -> anyhow::Result
     );
     Ok(())
 }
+
+#[test]
+fn submit_uses_adopted_branch_as_pr_head_without_cache() -> anyhow::Result<()> {
+    let repo = TestRepo::new("submit-adopted-branch")?;
+    repo.init_main()?;
+    let change = repo.create_change("feature", "feature title", "feature body")?;
+
+    // Adopt an arbitrarily-named local branch (no PR yet) via track.
+    let branch = "my-feature";
+    repo.set_bookmark(branch, &change.commit_id)?;
+    repo.seed_pr_number(branch, 42)?;
+    assert_success("track my-feature", &repo.run(&["track", branch])?);
+
+    // Wipe the cache: the adopted branch binding must survive on the bookmark
+    // alone — the cache is never a correctness gate.
+    repo.delete_cache()?;
+
+    let output = repo.run(&["submit", "--yes"])?;
+    assert_success("submit", &output);
+
+    // The PR opened on the adopted branch, not a generated stack/* name.
+    let pr = repo.stored_pr(42)?;
+    assert_eq!(pr["headRefName"], json!(branch));
+    assert_eq!(repo.git_remote_branch_target(branch)?, change.commit_id);
+    let generated = branch_for("feature-title", &change.change_id);
+    assert!(
+        !repo.remote_branch_exists(&generated)?,
+        "submit must not mint a stack/* branch when a tracked branch exists"
+    );
+    Ok(())
+}

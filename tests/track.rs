@@ -81,3 +81,50 @@ fn track_dry_run_writes_no_cache() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn track_adopts_local_branch_when_no_pr_exists() -> anyhow::Result<()> {
+    let repo = TestRepo::new("track-local-no-pr")?;
+    repo.init_main()?;
+    let change = repo.create_change("feature", "feature title", "feature body")?;
+
+    // A local branch with no PR and no remote counterpart.
+    let branch = "my-feature";
+    repo.set_bookmark(branch, &change.commit_id)?;
+    repo.delete_cache()?;
+
+    let output = repo.run(&["track", branch])?;
+    assert_success("track local branch", &output);
+    assert!(
+        stderr_of(&output).contains("no open PR"),
+        "should report local-only tracking:\n{}",
+        stderr_of(&output)
+    );
+
+    // The bookmark stays put, and no PR cache row was written (there is no PR).
+    assert_eq!(repo.bookmark_target(branch)?, change.commit_id);
+    assert!(
+        !repo.cache_path().exists(),
+        "local-only track must not write a pr_cache row"
+    );
+    Ok(())
+}
+
+#[test]
+fn track_fails_for_unknown_branch_without_pr() -> anyhow::Result<()> {
+    let repo = TestRepo::new("track-unknown-branch")?;
+    repo.init_main()?;
+    repo.create_change("feature", "feature title", "feature body")?;
+
+    let output = repo.run(&["track", "no-such-branch"])?;
+    assert!(
+        !output.status.success(),
+        "tracking a non-existent branch with no PR should fail"
+    );
+    assert!(
+        stderr_of(&output).contains("no local or remote branch"),
+        "error should explain the branch is unknown:\n{}",
+        stderr_of(&output)
+    );
+    Ok(())
+}
