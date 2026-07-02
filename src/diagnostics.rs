@@ -98,12 +98,19 @@ impl Diagnostics {
         // with the concrete mutations nested beneath it. The exhaustive
         // one-line-per-mutation dump is reserved for `--verbose`.
         if self.dry_run {
-            self.plan_line("planned mutations:");
+            self.plan_body("planned mutations:", PlanLineStyle::Header);
             for plan in plans {
-                self.plan_line(&format!(
-                    "  {}",
-                    submit_action_description(&context.github.repo, plan)
-                ));
+                let style = if plan.existing_pr.is_none() {
+                    PlanLineStyle::Create
+                } else if plan.pr_update_needed {
+                    PlanLineStyle::Update
+                } else {
+                    PlanLineStyle::Unchanged
+                };
+                self.plan_body(
+                    &format!("  {}", submit_action_description(&context.github.repo, plan)),
+                    style,
+                );
                 let mut details = Vec::new();
                 if plan.push_needed {
                     details.push(format!("push {}", config.remote));
@@ -117,7 +124,7 @@ impl Diagnostics {
                     } else {
                         "├─"
                     };
-                    self.plan_line(&format!("    {branch} {detail}"));
+                    self.plan_body(&format!("    {branch} {detail}"), PlanLineStyle::Detail);
                 }
             }
         }
@@ -209,6 +216,19 @@ impl Diagnostics {
     pub(super) fn plan_line(self, line: &str) {
         if self.dry_run {
             ui_info!("{line}");
+        } else if self.verbose {
+            tracing::debug!("{line}");
+        }
+    }
+
+    /// Like [`plan_line`], but for the structured plan body: aligned and colored
+    /// by `style` instead of carrying the repeated `Info` gutter. Used for the
+    /// hierarchical mutation preview so it reads cleanly and the same way across
+    /// commands.
+    #[tracing::instrument(level = "trace", skip_all)]
+    pub(super) fn plan_body(self, line: &str, style: PlanLineStyle) {
+        if self.dry_run {
+            ui_plan_line(line, style);
         } else if self.verbose {
             tracing::debug!("{line}");
         }
