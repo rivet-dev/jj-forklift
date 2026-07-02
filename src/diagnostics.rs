@@ -61,17 +61,21 @@ impl Diagnostics {
             return;
         }
         let line = || {
-            ui_progress(
-                action.progress_verb(),
-                &format!(
-                    "PR {} `{}`",
-                    ui_hyperlink(
-                        &github_pr_url(repo, entry.pr_number),
-                        &format!("#{}", entry.pr_number)
-                    ),
-                    change.title
+            let message = format!(
+                "PR {} `{}`",
+                ui_hyperlink(
+                    &github_pr_url(repo, entry.pr_number),
+                    &format!("#{}", entry.pr_number)
                 ),
+                change.title
             );
+            // A `Nothing` action mutated nothing; dim the whole line so the
+            // genuinely-changed PRs stand out against the no-op backdrop.
+            if action == SubmitPrAction::Nothing {
+                ui_progress_muted(action.progress_verb(), &message);
+            } else {
+                ui_progress(action.progress_verb(), &message);
+            }
         };
         if let Some(progress) = progress {
             progress.suspend(line);

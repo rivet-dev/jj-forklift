@@ -55,6 +55,19 @@ pub(super) fn ui_progress(verb: &str, message: &str) {
     }
 }
 
+/// Like [`ui_progress`], but dims the whole line — verb and message both. Used
+/// for no-op actions the plan lists only for completeness (e.g. `Nothing PR
+/// #123 ...`), so they recede beneath the real `Submitted`/`Updated` lines
+/// instead of competing with them via a bold-green verb.
+pub(super) fn ui_progress_muted(verb: &str, message: &str) {
+    let padded = format!("{verb:>width$}", width = PROGRESS_VERB_WIDTH);
+    if ui_color_enabled() {
+        eprintln!("{}", format!("{padded} {message}").dimmed());
+    } else {
+        eprintln!("{padded} {message}");
+    }
+}
+
 /// Wraps `text` in an OSC 8 terminal hyperlink pointing at `url`, so capable
 /// terminals render `text` as a clickable link to the full URL without showing
 /// it inline. When rich output is disabled (`NO_COLOR`, piped output) it falls
