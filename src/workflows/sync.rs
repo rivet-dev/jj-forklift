@@ -726,8 +726,12 @@ pub(crate) async fn fetch_remote(
     config: &AppConfig,
     diagnostics: Diagnostics,
 ) -> Result<()> {
-    let args = ["git", "fetch", "--remote", config.remote.as_str()];
-    run_fetch_remote_command(runner, config, diagnostics, &args).await
+    let mut args = vec!["git".to_owned(), "fetch".to_owned()];
+    append_fetch_branch_flags(&mut args, runner, config).await?;
+    args.push("--remote".to_owned());
+    args.push(config.remote.clone());
+    let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+    run_fetch_remote_command(runner, config, diagnostics, &arg_refs).await
 }
 
 pub(crate) async fn fetch_remote_preserving_local_commits(
@@ -735,15 +739,38 @@ pub(crate) async fn fetch_remote_preserving_local_commits(
     config: &AppConfig,
     diagnostics: Diagnostics,
 ) -> Result<()> {
-    let args = [
-        "git",
-        "fetch",
-        "--config",
-        "git.abandon-unreachable-commits=false",
-        "--remote",
-        config.remote.as_str(),
+    let mut args = vec![
+        "git".to_owned(),
+        "fetch".to_owned(),
+        "--config".to_owned(),
+        "git.abandon-unreachable-commits=false".to_owned(),
     ];
-    run_fetch_remote_command(runner, config, diagnostics, &args).await
+    append_fetch_branch_flags(&mut args, runner, config).await?;
+    args.push("--remote".to_owned());
+    args.push(config.remote.clone());
+    let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+    run_fetch_remote_command(runner, config, diagnostics, &arg_refs).await
+}
+
+/// Restrict the trunk-movement fetches to the branches forklift actually reads:
+/// trunk (for trunk movement plus landed and duplicate detection, all ancestry
+/// checks against `<trunk>@<remote>`) and every local stack bookmark (so submit
+/// sees out-of-band pushes or deletions to a branch it is about to push, which
+/// jj propagates only for the branch patterns it fetches). Fetching these by
+/// name is dramatically cheaper than a bare `jj git fetch`, which pulls and
+/// imports every branch on the remote and dominates runtime on a large repo.
+async fn append_fetch_branch_flags(
+    args: &mut Vec<String>,
+    runner: &impl CommandRunner,
+    config: &AppConfig,
+) -> Result<()> {
+    args.push("--branch".to_owned());
+    args.push(config.trunk.clone());
+    for bookmark in local_stack_bookmarks(runner, config).await? {
+        args.push("--branch".to_owned());
+        args.push(bookmark);
+    }
+    Ok(())
 }
 
 async fn run_fetch_remote_command(
