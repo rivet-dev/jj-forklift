@@ -117,6 +117,40 @@ pub(super) fn ui_detail_line(message: &str) {
     }
 }
 
+/// Visual intent for a dry-run plan body line rendered by [`ui_plan_line`].
+pub(super) enum PlanLineStyle {
+    /// A section header, e.g. `planned mutations:`.
+    Header,
+    /// A mutation that creates something new.
+    Create,
+    /// A mutation that updates something that already exists.
+    Update,
+    /// A no-op the plan lists only for completeness.
+    Unchanged,
+    /// A nested detail beneath a mutation (the `├─`/`└─` tree lines).
+    Detail,
+}
+
+/// Renders a dry-run plan body line aligned under the status-message column and
+/// colored to convey intent, without the repeated `Info` gutter that the plain
+/// `ui_info` lines carry. Changed mutations (`Create`/`Update`) are colored so
+/// they pop; no-ops and nested details recede. This is the shared look every
+/// command's dry-run plan uses so the output reads the same everywhere.
+pub(super) fn ui_plan_line(message: &str, style: PlanLineStyle) {
+    let indent = " ".repeat(PROGRESS_VERB_WIDTH + 1);
+    if !ui_color_enabled() {
+        println!("{indent}{message}");
+        return;
+    }
+    let styled = match style {
+        PlanLineStyle::Header => message.cyan().bold().to_string(),
+        PlanLineStyle::Create => message.green().to_string(),
+        PlanLineStyle::Update => message.yellow().to_string(),
+        PlanLineStyle::Unchanged | PlanLineStyle::Detail => message.dimmed().to_string(),
+    };
+    println!("{indent}{styled}");
+}
+
 pub(super) fn ui_conflict(message: &str) {
     let padded = format!("{:>width$}", "Conflict", width = PROGRESS_VERB_WIDTH);
     if ui_color_enabled() {
