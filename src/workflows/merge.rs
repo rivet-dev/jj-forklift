@@ -968,10 +968,24 @@ pub(crate) async fn cleanup_landed_branches(
         return Ok(0);
     }
     let trunk_tip = git_rev_parse(runner, &remote_git_ref(config)).await?;
+    // Resolve each bookmark's commit first. These are `jj` reads that snapshot
+    // the working copy, so they stay sequential (jj serializes on its own lock).
+    let mut commits = Vec::new();
+    for branch in &bookmarks {
+        commits.push(jj_ref_commit_id(runner, branch).await?);
+    }
+    // The ancestry checks are pure `git merge-base --is-ancestor`, so fan them out.
+    let ancestries = stream::iter(
+        commits
+            .iter()
+            .map(|commit| git_commit_is_ancestor(runner, commit, &trunk_tip)),
+    )
+    .buffered(NETWORK_CONCURRENCY)
+    .collect::<Vec<_>>()
+    .await;
     let mut landed = Vec::new();
-    for branch in bookmarks {
-        let commit = jj_ref_commit_id(runner, &branch).await?;
-        if git_commit_is_ancestor(runner, &commit, &trunk_tip).await? {
+    for (branch, is_ancestor) in bookmarks.into_iter().zip(ancestries) {
+        if is_ancestor? {
             landed.push(branch);
         }
     }

@@ -544,17 +544,30 @@ pub(crate) async fn untracked_remote_bookmark_blockers(
     rev: &str,
     already_tracked_branch: &str,
 ) -> Result<Vec<RemoteBookmark>> {
+    // Filter to candidate bookmarks first (pure), then run the ancestry checks
+    // (`git merge-base --is-ancestor`, which takes no jj lock) concurrently.
+    let candidates = remote_bookmarks(runner)
+        .await?
+        .into_iter()
+        .filter(|bookmark| {
+            bookmark.remote == config.remote
+                && !bookmark.tracked
+                && !bookmark.conflicted
+                && bookmark.name != already_tracked_branch
+                && !bookmark.commit_id.is_empty()
+        })
+        .collect::<Vec<_>>();
+    let ancestries = stream::iter(
+        candidates
+            .iter()
+            .map(|bookmark| git_commit_is_ancestor(runner, rev, &bookmark.commit_id)),
+    )
+    .buffered(NETWORK_CONCURRENCY)
+    .collect::<Vec<_>>()
+    .await;
     let mut blockers = Vec::new();
-    for bookmark in remote_bookmarks(runner).await? {
-        if bookmark.remote != config.remote
-            || bookmark.tracked
-            || bookmark.conflicted
-            || bookmark.name == already_tracked_branch
-            || bookmark.commit_id.is_empty()
-        {
-            continue;
-        }
-        if git_commit_is_ancestor(runner, rev, &bookmark.commit_id).await? {
+    for (bookmark, is_ancestor) in candidates.into_iter().zip(ancestries) {
+        if is_ancestor? {
             blockers.push(bookmark);
         }
     }
