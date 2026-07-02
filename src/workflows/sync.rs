@@ -328,9 +328,20 @@ pub(crate) async fn prune_landed_duplicate_changes(
     stack: &[ResolvedChange],
     diagnostics: Diagnostics,
 ) -> Result<Vec<String>> {
+    // Query each change's landed commits concurrently. These are read-only
+    // `jj log` lookups, so they take no repo lock and fan out safely.
+    let landed = stream::iter(
+        stack
+            .iter()
+            .map(|change| landed_change_commits(runner, config, &change.change_id)),
+    )
+    .buffered(NETWORK_CONCURRENCY)
+    .collect::<Vec<_>>()
+    .await;
+
     let mut landed_duplicates = Vec::new();
-    for change in stack {
-        let landed_commits = landed_change_commits(runner, config, &change.change_id).await?;
+    for (change, landed_commits) in stack.iter().zip(landed) {
+        let landed_commits = landed_commits?;
         if landed_commits
             .iter()
             .any(|commit_id| commit_id != &change.commit_id)
@@ -469,17 +480,16 @@ pub(crate) async fn sync_refresh_frozen_dependencies(
     let github = GitHubContext::resolve(runner)
         .await
         .context("resolve GitHub repository for frozen dependencies")?;
-    let mut prs = Vec::new();
-    for dependency in &stack_resolution.frozen_dependencies {
-        let pr = fetch_pr_by_number(
-            runner,
-            &github,
-            "sync-frozen",
-            dependency.bookmark.pr_number,
-        )
-        .await?;
-        prs.push(pr);
-    }
+    // Fetch every frozen dependency's PR concurrently; ordering is preserved so
+    // the stack-shape validation below still sees them bottom-to-top.
+    let prs = stream::iter(stack_resolution.frozen_dependencies.iter().map(|dependency| {
+        fetch_pr_by_number(runner, &github, "sync-frozen", dependency.bookmark.pr_number)
+    }))
+    .buffered(NETWORK_CONCURRENCY)
+    .collect::<Vec<_>>()
+    .await
+    .into_iter()
+    .collect::<Result<Vec<_>>>()?;
     let active_dependencies = validate_sync_frozen_pr_stack(
         config,
         &github,
