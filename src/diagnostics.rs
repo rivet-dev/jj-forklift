@@ -35,7 +35,10 @@ impl Diagnostics {
         message: &str,
         total: usize,
     ) -> Option<ProgressBar> {
-        if self.dry_run || total == 0 {
+        // Progress is shown in dry-run too: a dry run still performs all the live
+        // discovery (stack resolution, PR prefetch, planning), which on a large
+        // stack is the bulk of the wait. Only genuinely empty work is silent.
+        if total == 0 {
             return None;
         }
         let progress = ui_progress_bar(verb, message, total);

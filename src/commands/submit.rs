@@ -14,6 +14,9 @@ pub(crate) async fn run(
         .await
         .map_err(|error| phase_error("submit-fetch", &config.remote, error))?;
 
+    // A read-only step, but on a large working copy jj's snapshot here can take a
+    // while, so surface it (in dry-run too) rather than pausing silently.
+    ui_progress("Resolving", "stack");
     let mut context = resolve_stack_context(runner, DEFAULT_STACK_REVSET)
         .await
         .map_err(|error| phase_error("resolve-stack", DEFAULT_STACK_REVSET, error))?;

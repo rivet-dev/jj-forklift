@@ -184,8 +184,13 @@ pub(super) fn ui_progress_bar(verb: &str, message: &str, total: usize) -> Option
 }
 
 pub(super) fn ui_finish_progress_bar(progress: ProgressBar) {
-    progress.force_draw();
+    // Leave the completed bar on screen, but terminate its line with a newline.
+    // The bar draws to stderr with a bare carriage return and no trailing newline
+    // on `finish()`, so without this the next stdout write (plan/summary text)
+    // lands on the bar's line and mangles it. The explicit newline moves the
+    // cursor past the persisted bar so following output starts clean.
     progress.finish();
+    eprintln!();
 }
 
 /// Maps an internal recovery-phase id to a cargo-style `(verb, message)` pair
