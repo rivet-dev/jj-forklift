@@ -340,16 +340,23 @@ pub(crate) async fn status_frozen_dependencies(
     github: &GitHubContext,
     dependencies: &[FrozenDependency],
 ) -> Vec<StatusFrozenDependency> {
-    let mut result = Vec::new();
-    for dependency in dependencies {
-        let entry = match fetch_pr_by_number(
+    // Fetch every frozen dependency's PR concurrently; entries are assembled in
+    // order below so the rendered status is deterministic.
+    let fetched = stream::iter(dependencies.iter().map(|dependency| {
+        fetch_pr_by_number(
             runner,
             github,
             &dependency.change.change_id,
             dependency.bookmark.pr_number,
         )
-        .await
-        {
+    }))
+    .buffered(NETWORK_CONCURRENCY)
+    .collect::<Vec<_>>()
+    .await;
+
+    let mut result = Vec::new();
+    for (dependency, entry) in dependencies.iter().zip(fetched) {
+        let entry = match entry {
             Ok(pr) => {
                 let problem = if pr.head_ref_oid != dependency.change.commit_id {
                     Some(format!(
