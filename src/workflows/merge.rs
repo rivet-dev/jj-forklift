@@ -333,10 +333,20 @@ pub(crate) async fn merge_stack(
     // lets those recomputes overlap instead of waiting on each PR in series.
     let mut candidates: Vec<MergeCandidate> = Vec::new();
     let checking_progress = diagnostics.progress_bar("Checking", "PRs", context.stack.len());
-    for (index, change) in context.stack.iter().enumerate() {
-        let (entry, mut pr) = match resolve_merge_pr(runner, config, &context, change, diagnostics)
-            .await
-        {
+    // Resolve every PR concurrently — these are independent reads. The base
+    // re-points, dry-run handling, and error propagation below stay sequential
+    // and ordered exactly as before.
+    let resolved_prs = stream::iter(
+        context
+            .stack
+            .iter()
+            .map(|change| resolve_merge_pr(runner, config, &context, change, diagnostics)),
+    )
+    .buffered(NETWORK_CONCURRENCY)
+    .collect::<Vec<_>>()
+    .await;
+    for (index, (change, resolved)) in context.stack.iter().zip(resolved_prs).enumerate() {
+        let (entry, mut pr) = match resolved {
             Ok(resolved) => resolved,
             Err(error) => {
                 if let Some(progress) = checking_progress {
@@ -1202,7 +1212,8 @@ pub(crate) async fn resolve_merge_pr_from_live_bookmarks(
     let mut matches = Vec::new();
     for head_branch in local_stack_bookmarks_for_change(runner, config, change).await? {
         if let Some(entry) =
-            lookup_open_pr_by_head_branch(runner, github, &change.change_id, &head_branch).await?
+            lookup_open_pr_by_head_branch(runner, github, &change.change_id, &head_branch, None)
+                .await?
         {
             validate_submit_bookmark_state(runner, config, change, &entry).await?;
             let pr = fetch_pr_for_merge(runner, github, &change.change_id, entry.pr_number).await?;

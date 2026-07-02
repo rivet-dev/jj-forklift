@@ -75,6 +75,149 @@ pub(crate) async fn validate_submit_bookmark_state(
     Ok(())
 }
 
+/// Data fetched once, concurrently, before the sequential planning loop, so the
+/// loop's per-change lookups become in-memory reads. Every field is a pure
+/// optimization: a lookup that misses falls back to the exact live call, so
+/// planning behaves identically and is only faster when the cache is warm.
+#[derive(Default)]
+pub(crate) struct PlanningPrefetch {
+    /// head branch -> live PR metadata + stack-comment id, for the stack's cached
+    /// open PRs.
+    prs_by_head: HashMap<String, PrCacheEntry>,
+    /// head branch -> remote head oid (`None` when the branch is absent on the
+    /// remote), for the stack's cached branches.
+    remote_heads: HashMap<String, Option<String>>,
+}
+
+/// Prefetch the live PR metadata, stack-comment ids, and remote head oids for the
+/// stack's already-cached PRs, all concurrently. The planning loop otherwise
+/// makes these calls one change at a time, which on a large stack is dozens of
+/// serial `gh`/`git` round-trips. Changes with no cache entry (brand-new or
+/// adopted) are absent from the prefetch and resolve live during planning.
+pub(crate) async fn build_planning_prefetch(
+    runner: &impl CommandRunner,
+    config: &AppConfig,
+    context: &AppContext,
+    store: &CacheStore,
+    diagnostics: Diagnostics,
+) -> Result<PlanningPrefetch> {
+    let github = &context.github;
+    let cached = context
+        .stack
+        .iter()
+        .filter_map(|change| {
+            store
+                .get_pr(&github.repo, &change.change_id)
+                .map(|entry| (change.change_id.clone(), entry.pr_number, entry.head_branch.clone()))
+        })
+        .collect::<Vec<_>>();
+
+    // Fetch every cached PR's live metadata and stack-comment id concurrently. A
+    // PR that no longer loads, or is no longer open, is dropped so the branch
+    // resolves live (matching the `gh pr list --head --state open` semantics the
+    // live path uses). The bar advances as each fetch completes so a large stack
+    // shows steady progress instead of a silent pause (including in dry-run).
+    let progress = diagnostics.progress_bar("Prefetching", "pull requests", cached.len());
+    let fetched = stream::iter(cached.iter().map(|(change_id, pr_number, _)| {
+        let pr_number = *pr_number;
+        let progress = progress.clone();
+        async move {
+            let entry = async {
+                let pr = fetch_pr_by_number(runner, github, change_id, pr_number)
+                    .await
+                    .ok()?;
+                if !pr.state.eq_ignore_ascii_case("OPEN") {
+                    return None;
+                }
+                let comment_id = find_stack_comment_id(runner, github, pr_number, change_id).await;
+                Some(pr.into_cache_entry(comment_id))
+            }
+            .await;
+            if let Some(progress) = &progress {
+                progress.inc(1);
+            }
+            entry
+        }
+    }))
+    .buffered(NETWORK_CONCURRENCY)
+    .collect::<Vec<_>>()
+    .await;
+    if let Some(progress) = progress {
+        ui_finish_progress_bar(progress);
+    }
+
+    let mut prs_by_head = HashMap::new();
+    for entry in fetched.into_iter().flatten() {
+        prs_by_head.insert(entry.head_branch.clone(), entry);
+    }
+
+    let branches = cached
+        .into_iter()
+        .map(|(_, _, head_branch)| head_branch)
+        .collect::<Vec<_>>();
+    let remote_heads = batch_remote_head_oids(runner, config, &branches).await?;
+
+    Ok(PlanningPrefetch {
+        prs_by_head,
+        remote_heads,
+    })
+}
+
+/// Remote head oid for `branch`, served from the planning prefetch when present
+/// and falling back to a live `git ls-remote` for a branch the prefetch never
+/// warmed (e.g. a change with no cache entry).
+async fn resolve_remote_head(
+    prefetch: &PlanningPrefetch,
+    runner: &impl CommandRunner,
+    config: &AppConfig,
+    branch: &str,
+) -> Result<Option<String>> {
+    if let Some(cached) = prefetch.remote_heads.get(branch) {
+        return Ok(cached.clone());
+    }
+    remote_head_oid(runner, &config.remote, branch).await
+}
+
+/// Resolve the remote head oids for many branches in one `git ls-remote` (a ref
+/// advertisement, no object transfer) instead of one call per branch. Branches
+/// absent from the remote map to `None`.
+async fn batch_remote_head_oids(
+    runner: &impl CommandRunner,
+    config: &AppConfig,
+    branches: &[String],
+) -> Result<HashMap<String, Option<String>>> {
+    let mut map = branches
+        .iter()
+        .map(|branch| (branch.clone(), None))
+        .collect::<HashMap<String, Option<String>>>();
+    if branches.is_empty() {
+        return Ok(map);
+    }
+
+    let mut args = vec!["ls-remote".to_owned(), "--heads".to_owned(), config.remote.clone()];
+    for branch in branches {
+        args.push(format!("refs/heads/{branch}"));
+    }
+    let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+    let output = git_run(runner, &arg_refs).await?;
+    if !output.success {
+        bail!(
+            "`git ls-remote {}` failed while batching remote heads: {}",
+            config.remote,
+            output.stderr.trim()
+        );
+    }
+    for line in output.stdout.lines() {
+        let Some((oid, refname)) = line.split_once('\t') else {
+            continue;
+        };
+        if let Some(name) = refname.trim().strip_prefix("refs/heads/") {
+            map.insert(name.to_owned(), Some(oid.trim().to_owned()));
+        }
+    }
+    Ok(map)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn resolve_submit_head_branch(
     runner: &impl CommandRunner,
@@ -84,6 +227,7 @@ pub(crate) async fn resolve_submit_head_branch(
     context: &AppContext,
     change: &ResolvedChange,
     orphans: &mut Vec<OrphanedPr>,
+    prefetch: &PlanningPrefetch,
     diagnostics: Diagnostics,
 ) -> Result<(String, Option<PrCacheEntry>, Option<String>)> {
     if let Some(discovered) = discover_existing_pr_from_local_bookmarks(
@@ -93,6 +237,7 @@ pub(crate) async fn resolve_submit_head_branch(
         &context.github,
         change,
         orphans,
+        prefetch,
     )
     .await?
     {
@@ -111,6 +256,7 @@ pub(crate) async fn resolve_submit_head_branch(
                 &context.github,
                 change,
                 &adopted,
+                prefetch,
             )
             .await;
         }
@@ -125,6 +271,7 @@ pub(crate) async fn resolve_submit_head_branch(
             &context.github,
             change,
             entry,
+            prefetch,
         )
         .await
         {
@@ -139,10 +286,15 @@ pub(crate) async fn resolve_submit_head_branch(
     }
 
     let head_branch = deterministic_head_branch(config, change, used_head_branches);
-    let existing_pr =
-        lookup_open_pr_by_head_branch(runner, &context.github, &change.change_id, &head_branch)
-            .await?;
-    let expected_remote_head = remote_head_oid(runner, &config.remote, &head_branch).await?;
+    let existing_pr = lookup_open_pr_by_head_branch(
+        runner,
+        &context.github,
+        &change.change_id,
+        &head_branch,
+        Some(&prefetch.prs_by_head),
+    )
+    .await?;
+    let expected_remote_head = resolve_remote_head(prefetch, runner, config, &head_branch).await?;
 
     if let Some(existing_pr) = existing_pr {
         validate_submit_bookmark_state(runner, config, change, &existing_pr).await?;
@@ -173,6 +325,7 @@ pub(crate) async fn resolve_submit_cached_head_branch(
     github: &GitHubContext,
     change: &ResolvedChange,
     entry: &PrCacheEntry,
+    prefetch: &PlanningPrefetch,
 ) -> Result<(String, Option<PrCacheEntry>, Option<String>)> {
     let head_branch = entry.head_branch.clone();
     if used_head_branches.contains(&head_branch) {
@@ -180,7 +333,7 @@ pub(crate) async fn resolve_submit_cached_head_branch(
     }
     validate_submit_bookmark_state(runner, config, change, entry).await?;
     let existing_pr = lookup_cached_pr(runner, github, &change.change_id, &head_branch, entry).await?;
-    let expected_remote_head = remote_head_oid(runner, &config.remote, &head_branch).await?;
+    let expected_remote_head = resolve_remote_head(prefetch, runner, config, &head_branch).await?;
     used_head_branches.insert(head_branch.clone());
     Ok((head_branch, Some(existing_pr), expected_remote_head))
 }
@@ -198,16 +351,23 @@ pub(crate) async fn resolve_submit_pending_head_branch(
     github: &GitHubContext,
     change: &ResolvedChange,
     head_branch: &str,
+    prefetch: &PlanningPrefetch,
 ) -> Result<(String, Option<PrCacheEntry>, Option<String>)> {
     if used_head_branches.contains(head_branch) {
         bail!("cache records duplicate head branch `{head_branch}` in stack");
     }
-    let existing_pr =
-        lookup_open_pr_by_head_branch(runner, github, &change.change_id, head_branch).await?;
+    let existing_pr = lookup_open_pr_by_head_branch(
+        runner,
+        github,
+        &change.change_id,
+        head_branch,
+        Some(&prefetch.prs_by_head),
+    )
+    .await?;
     if let Some(existing_pr) = &existing_pr {
         validate_submit_bookmark_state(runner, config, change, existing_pr).await?;
     }
-    let expected_remote_head = remote_head_oid(runner, &config.remote, head_branch).await?;
+    let expected_remote_head = resolve_remote_head(prefetch, runner, config, head_branch).await?;
     used_head_branches.insert(head_branch.to_owned());
     Ok((head_branch.to_owned(), existing_pr, expected_remote_head))
 }
@@ -220,14 +380,21 @@ pub(crate) async fn discover_existing_pr_from_local_bookmarks(
     github: &GitHubContext,
     change: &ResolvedChange,
     orphans: &mut Vec<OrphanedPr>,
+    prefetch: &PlanningPrefetch,
 ) -> Result<Option<(String, Option<PrCacheEntry>, Option<String>)>> {
     let mut matches = Vec::new();
     for head_branch in local_stack_bookmarks_for_change(runner, config, change).await? {
         if used_head_branches.contains(&head_branch) {
             continue;
         }
-        if let Some(existing_pr) =
-            lookup_open_pr_by_head_branch(runner, github, &change.change_id, &head_branch).await?
+        if let Some(existing_pr) = lookup_open_pr_by_head_branch(
+            runner,
+            github,
+            &change.change_id,
+            &head_branch,
+            Some(&prefetch.prs_by_head),
+        )
+        .await?
         {
             matches.push((head_branch, existing_pr));
         }
@@ -237,7 +404,7 @@ pub(crate) async fn discover_existing_pr_from_local_bookmarks(
         [] => Ok(None),
         [(head_branch, existing_pr)] => {
             validate_submit_bookmark_state(runner, config, change, existing_pr).await?;
-            let expected_remote_head = remote_head_oid(runner, &config.remote, head_branch).await?;
+            let expected_remote_head = resolve_remote_head(prefetch, runner, config, head_branch).await?;
             used_head_branches.insert(head_branch.clone());
             Ok(Some((
                 head_branch.clone(),
@@ -253,6 +420,7 @@ pub(crate) async fn discover_existing_pr_from_local_bookmarks(
                 matches,
                 used_head_branches,
                 orphans,
+                prefetch,
             )
             .await
         }
@@ -272,6 +440,7 @@ async fn resolve_collapsed_bookmark_matches(
     matches: Vec<(String, PrCacheEntry)>,
     used_head_branches: &mut HashSet<String>,
     orphans: &mut Vec<OrphanedPr>,
+    prefetch: &PlanningPrefetch,
 ) -> Result<Option<(String, Option<PrCacheEntry>, Option<String>)>> {
     let change_prefix = change_id_branch_prefix(&change.change_id);
     let (mut owned, orphaned): (Vec<_>, Vec<_>) = matches
@@ -303,7 +472,7 @@ async fn resolve_collapsed_bookmark_matches(
 
     let (head_branch, existing_pr) = owned.pop().expect("exactly one canonical bookmark");
     validate_submit_bookmark_state(runner, config, change, &existing_pr).await?;
-    let expected_remote_head = remote_head_oid(runner, &config.remote, &head_branch).await?;
+    let expected_remote_head = resolve_remote_head(prefetch, runner, config, &head_branch).await?;
     used_head_branches.insert(head_branch.clone());
 
     for (branch, pr) in orphaned {
@@ -452,7 +621,6 @@ pub(crate) async fn submit_stack(
         .map_err(|error| phase_error("validate-submit-bases", "stack", error))?;
 
     tracing::debug!(phase = "plan-submit", "recovery phase");
-    let plan_progress = diagnostics.progress_bar("Planning", "submit", context.stack.len());
     let mut store = CacheStore::load_current_best_effort(runner, diagnostics, "plan-submit")
         .await
         .map_err(|error| phase_error("plan-submit", "cache", error))?;
@@ -465,6 +633,15 @@ pub(crate) async fn submit_stack(
     )
     .await
     .map_err(|error| phase_error("plan-submit", "frozen dependencies", error))?;
+    // Warm the per-change PR metadata, comment ids, and remote heads concurrently
+    // so the sequential resolution below reads them from memory instead of making
+    // dozens of serial round-trips.
+    let prefetch = build_planning_prefetch(runner, config, context, &store, diagnostics)
+        .await
+        .map_err(|error| phase_error("plan-submit", "prefetch", error))?;
+    // Create the planning bar only now, after the prefetch bar has finished, so
+    // the two never render at the same time and fight over the terminal line.
+    let plan_progress = diagnostics.progress_bar("Planning", "submit", context.stack.len());
     let mut plans = Vec::new();
     let mut used_head_branches = HashSet::new();
     let mut orphaned_prs: Vec<OrphanedPr> = Vec::new();
@@ -485,6 +662,7 @@ pub(crate) async fn submit_stack(
             context,
             change,
             &mut orphaned_prs,
+            &prefetch,
             diagnostics,
         )
         .await
