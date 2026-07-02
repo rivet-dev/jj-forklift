@@ -1317,7 +1317,19 @@ pub(crate) async fn validate_submit_bases(
         );
     }
 
-    for pair in stack.windows(2) {
+    // Compute every adjacent-pair merge-base concurrently (read-only `git
+    // merge-base`), then validate in order. The parent check is pure, so it still
+    // short-circuits deterministically below.
+    let merge_bases = stream::iter(
+        stack
+            .windows(2)
+            .map(|pair| merge_base(runner, &pair[1].commit_id, &pair[0].commit_id)),
+    )
+    .buffered(NETWORK_CONCURRENCY)
+    .collect::<Vec<_>>()
+    .await;
+
+    for (pair, pair_merge_base) in stack.windows(2).zip(merge_bases) {
         let parent = &pair[0];
         let child = &pair[1];
         if selected_parent(child, &HashSet::from([parent.commit_id.as_str()]))
@@ -1332,7 +1344,7 @@ pub(crate) async fn validate_submit_bases(
             )));
         }
 
-        let merge_base = merge_base(runner, &child.commit_id, &parent.commit_id).await?;
+        let merge_base = pair_merge_base?;
         if merge_base != parent.commit_id {
             bail!(CliError::new(format!(
                 "submit base validation failed for {} ({}): merge-base with parent change {} ({}) is {}",
