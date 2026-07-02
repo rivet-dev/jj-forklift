@@ -31,15 +31,22 @@ pub(crate) async fn get_stack(
     }
 
     diagnostics.phase("resolve-prs");
-    let mut prs = Vec::new();
-    let progress = diagnostics.progress_bar("Fetching", "pull requests", pr_numbers.len());
-    for (index, pr_number) in pr_numbers.into_iter().enumerate() {
-        prs.push(fetch_pr_by_number(runner, &github, "get", pr_number).await?);
-        if let Some(progress) = &progress {
-            progress.set_position((index + 1) as u64);
-        }
-    }
+    let total_prs = pr_numbers.len();
+    let progress = diagnostics.progress_bar("Fetching", "pull requests", total_prs);
+    // Fetch every PR in the stack concurrently. `buffered` preserves order, so
+    // `validate_get_pr_stack` below still sees them bottom-to-top.
+    let prs = stream::iter(
+        pr_numbers
+            .into_iter()
+            .map(|pr_number| fetch_pr_by_number(runner, &github, "get", pr_number)),
+    )
+    .buffered(NETWORK_CONCURRENCY)
+    .collect::<Vec<_>>()
+    .await
+    .into_iter()
+    .collect::<Result<Vec<_>>>()?;
     if let Some(progress) = progress {
+        progress.set_position(total_prs as u64);
         ui_finish_progress_bar(progress);
     }
     validate_get_pr_stack(config, &github, target_pr_number, &prs)?;

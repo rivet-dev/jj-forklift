@@ -904,6 +904,7 @@ fn write_executable(path: &Path, contents: &str) -> anyhow::Result<()> {
 /// derives head/base oids and merged-state from the REAL remote (`git ls-remote`
 /// + `git merge-base --is-ancestor`), so it tracks actual repository state.
 const FAKE_GH: &str = r#"#!/usr/bin/env python3
+import fcntl
 import json
 import os
 import subprocess
@@ -912,6 +913,15 @@ import sys
 args = sys.argv[1:]
 gh_dir = os.environ.get("FORKLIFT_GH_DIR", ".")
 state_path = os.path.join(gh_dir, "gh-state.json")
+
+# Serialize concurrent fake-gh invocations. forklift now issues PR and comment
+# API calls in parallel, and the real GitHub API is atomic per request; this
+# lock gives the file-backed fake the same all-or-nothing semantics so
+# concurrent read-modify-write cycles on gh-state.json cannot clobber each
+# other. The handle is kept alive for the whole process; the OS drops the lock
+# on exit.
+_lock_fh = open(os.path.join(gh_dir, "gh-state.lock"), "w")
+fcntl.flock(_lock_fh, fcntl.LOCK_EX)
 
 with open(os.path.join(gh_dir, "gh-requests.jsonl"), "a") as fh:
     fh.write(json.dumps({"args": args}) + "\n")
