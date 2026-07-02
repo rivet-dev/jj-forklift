@@ -12,6 +12,7 @@ use std::sync::OnceLock;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
+use futures_util::stream::{self, StreamExt};
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use owo_colors::OwoColorize;
 use rusqlite::{Connection, params};
@@ -25,6 +26,11 @@ use unicode_normalization::UnicodeNormalization;
 use crate::empty_string_to_none;
 
 const CONFIG_PREFIX: &str = "stack";
+/// Max concurrent `gh`/`git` subprocesses when fanning out independent network
+/// calls (PR fetches, PR create/update, stack-comment upserts). Bounded to keep
+/// GitHub's secondary rate limiter and the local process table happy while still
+/// collapsing a stack's serial round-trips into a handful of waves.
+const NETWORK_CONCURRENCY: usize = 8;
 const DEFAULT_REMOTE: &str = "origin";
 const DEFAULT_TRUNK: &str = "main";
 const DEFAULT_REQUIRE_APPROVAL: bool = true;

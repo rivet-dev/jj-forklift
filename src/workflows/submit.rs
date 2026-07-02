@@ -588,35 +588,42 @@ pub(crate) async fn submit_stack(
     let mut entries = Vec::new();
 
     let pr_progress = diagnostics.progress_bar("Submitting", "pull requests", plans.len());
-    for (index, plan) in plans.into_iter().enumerate() {
+    // Create/update every PR concurrently. Each head branch is already on the
+    // remote from the push phase above, so GitHub accepts the calls in any
+    // order; only the cache writes and progress reporting below stay sequential.
+    let pr_results = stream::iter(plans.iter().map(|plan| {
         let previous_comment_id = plan
             .existing_pr
             .as_ref()
             .and_then(|entry| entry.stack_comment_id.clone());
-        let (action, entry) = match &plan.existing_pr {
-            None => (
-                SubmitPrAction::Submit,
-                create_pr(runner, &context.github, &plan, diagnostics)
-                    .await?
-                    .into_cache_entry(previous_comment_id),
-            ),
-            Some(existing) if plan.pr_update_needed => (
-                SubmitPrAction::Update,
-                update_pr(
-                    runner,
-                    &context.github,
-                    existing.pr_number,
-                    &plan,
-                    diagnostics,
-                )
-                .await?
-                .into_cache_entry(previous_comment_id),
-            ),
-            Some(existing) => (
-                SubmitPrAction::Nothing,
-                refreshed_cache_entry(existing, &plan, previous_comment_id),
-            ),
-        };
+        async move {
+            let result: Result<(SubmitPrAction, PrCacheEntry)> = match &plan.existing_pr {
+                None => Ok((
+                    SubmitPrAction::Submit,
+                    create_pr(runner, &context.github, plan, diagnostics)
+                        .await?
+                        .into_cache_entry(previous_comment_id),
+                )),
+                Some(existing) if plan.pr_update_needed => Ok((
+                    SubmitPrAction::Update,
+                    update_pr(runner, &context.github, existing.pr_number, plan, diagnostics)
+                        .await?
+                        .into_cache_entry(previous_comment_id),
+                )),
+                Some(existing) => Ok((
+                    SubmitPrAction::Nothing,
+                    refreshed_cache_entry(existing, plan, previous_comment_id),
+                )),
+            };
+            result
+        }
+    }))
+    .buffered(NETWORK_CONCURRENCY)
+    .collect::<Vec<_>>()
+    .await;
+
+    for (index, (plan, result)) in plans.into_iter().zip(pr_results).enumerate() {
+        let (action, entry) = result?;
         diagnostics.submit_pr_action(
             &context.github.repo,
             &plan.change,
@@ -646,7 +653,10 @@ pub(crate) async fn submit_stack(
         .map(|(change, entry)| (change.change_id.clone(), entry.clone()))
         .collect::<Vec<_>>();
     let comment_progress = diagnostics.progress_bar("Updating", "stack comments", entries.len());
-    for (index, (change, mut entry)) in entries.into_iter().enumerate() {
+    // Bodies are computed up front from the fully-resolved entry set (pure), so
+    // the comment upserts are independent and run concurrently. Summary counters
+    // and cache writes stay sequential below.
+    let comment_results = stream::iter(entries.iter().map(|(change, entry)| {
         let body = stack_comment_body_with_frozen(
             context,
             &frozen_entries,
@@ -654,16 +664,26 @@ pub(crate) async fn submit_stack(
             &change.change_id,
             &config.trunk,
         );
-        match upsert_stack_comment(
-            runner,
-            &context.github,
-            entry.pr_number,
-            &change.change_id,
-            &body,
-            diagnostics,
-        )
-        .await?
-        {
+        async move {
+            upsert_stack_comment(
+                runner,
+                &context.github,
+                entry.pr_number,
+                &change.change_id,
+                &body,
+                diagnostics,
+            )
+            .await
+        }
+    }))
+    .buffered(NETWORK_CONCURRENCY)
+    .collect::<Vec<_>>()
+    .await;
+
+    for (index, ((change, mut entry), action)) in
+        entries.into_iter().zip(comment_results).enumerate()
+    {
+        match action? {
             StackCommentAction::Created(comment_id) => {
                 summary.created_comments += 1;
                 entry.stack_comment_id = Some(comment_id);
@@ -815,15 +835,24 @@ pub(crate) async fn resolve_submit_frozen_dependency_entries(
     dependencies: &[FrozenDependency],
     diagnostics: Diagnostics,
 ) -> Result<Vec<(String, PrCacheEntry)>> {
-    let mut entries = Vec::new();
-    for dependency in dependencies {
-        let pr = fetch_pr_by_number(
+    // Fetch every frozen dependency's PR concurrently; the per-dependency
+    // validation and cache-entry assembly below stay ordered and sequential so
+    // warnings and errors surface deterministically.
+    let prs = stream::iter(dependencies.iter().map(|dependency| {
+        fetch_pr_by_number(
             runner,
             github,
             &dependency.change.change_id,
             dependency.bookmark.pr_number,
         )
-        .await?;
+    }))
+    .buffered(NETWORK_CONCURRENCY)
+    .collect::<Vec<_>>()
+    .await;
+
+    let mut entries = Vec::new();
+    for (dependency, pr) in dependencies.iter().zip(prs) {
+        let pr = pr?;
         validate_submit_frozen_dependency_pr(github, dependency, &pr)?;
         diagnostics.warn(format!(
             "resolved frozen dependency `{}` to PR #{} head `{}`",
@@ -1491,15 +1520,29 @@ pub(crate) async fn push_changed_heads(
     }
 
     let progress = diagnostics.progress_bar("Pushing", "bookmarks", changed.len());
-    for (index, plan) in changed.iter().enumerate() {
+    // Re-point every changed bookmark first. These are local jj mutations that
+    // take the repo's working-copy lock, so they must run sequentially.
+    for plan in &changed {
         set_submit_bookmark(runner, plan, diagnostics).await?;
-        push_submit_bookmark(runner, config, plan, diagnostics).await?;
-        verify_submit_bookmark_pushed(runner, config, plan).await?;
-        if let Some(progress) = &progress {
-            progress.set_position((index + 1) as u64);
-        }
+    }
+    // Push the whole stack in a single `jj git push`, so it rides one remote
+    // negotiation instead of one round-trip per head.
+    push_submit_bookmarks(runner, config, &changed, diagnostics).await?;
+    // Verify the remote heads concurrently; these are independent `git ls-remote`
+    // reads with no shared state.
+    let verifications = stream::iter(
+        changed
+            .iter()
+            .map(|plan| verify_submit_bookmark_pushed(runner, config, plan)),
+    )
+    .buffer_unordered(NETWORK_CONCURRENCY)
+    .collect::<Vec<_>>()
+    .await;
+    for result in verifications {
+        result?;
     }
     if let Some(progress) = progress {
+        progress.set_position(changed.len() as u64);
         ui_finish_progress_bar(progress);
     }
 
@@ -1558,27 +1601,28 @@ pub(crate) async fn set_submit_bookmark(
     Ok(())
 }
 
-pub(crate) async fn push_submit_bookmark(
+pub(crate) async fn push_submit_bookmarks(
     runner: &impl CommandRunner,
     config: &AppConfig,
-    plan: &SubmitPlan,
+    plans: &[&SubmitPlan],
     diagnostics: Diagnostics,
 ) -> Result<()> {
-    let args = [
+    let mut args = vec![
         "git",
         "push",
         "--ignore-working-copy",
         "--remote",
         config.remote.as_str(),
-        "--bookmark",
-        plan.head_branch.as_str(),
     ];
+    for plan in plans {
+        args.push("--bookmark");
+        args.push(plan.head_branch.as_str());
+    }
     diagnostics.command("jj", &args);
     let output = runner.run("jj", &args).await?;
     if !output.success {
         bail!(
-            "phase=push-refs object=bookmark:{} failed-command=`{}` error={} safe-next-command=`forklift submit --dry-run`",
-            plan.head_branch,
+            "phase=push-refs object=bookmarks failed-command=`{}` error={} safe-next-command=`forklift submit --dry-run`",
             display_command("jj", &args),
             output.stderr.trim()
         );
