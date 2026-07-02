@@ -1,7 +1,7 @@
 use super::super::cli::*;
 use super::super::*;
 
-pub(crate) fn run(
+pub(crate) async fn run(
     runner: &impl CommandRunner,
     config: &AppConfig,
     options: MergeOptions,
@@ -16,6 +16,7 @@ pub(crate) fn run(
     if options.sync {
         let target_label = options.target.as_deref().unwrap_or(DEFAULT_STACK_REVSET);
         let sync_revset = effective_sync_revset(runner, options.target.as_deref())
+            .await
             .map_err(|error| phase_error("resolve-sync-target", target_label, error))?;
         sync_stack(
             runner,
@@ -25,10 +26,12 @@ pub(crate) fn run(
             true,
             true,
             diagnostics,
-        )?;
+        )
+        .await?;
     }
     let target_label = options.target.as_deref().unwrap_or(DEFAULT_STACK_REVSET);
     let mut merge_revset = effective_merge_revset(runner, options.target.as_deref())
+        .await
         .map_err(|error| phase_error("resolve-merge-target", target_label, error))?;
     let sync_command = merge_sync_command(options.target.as_deref());
     let summary = match merge_stack(
@@ -39,7 +42,9 @@ pub(crate) fn run(
         &sync_command,
         options.admin,
         diagnostics,
-    ) {
+    )
+    .await
+    {
         Ok(summary) => summary,
         Err(error) if !dry_run => {
             if let Some(submit_required) = find_merge_submit_required(&error) {
@@ -49,7 +54,8 @@ pub(crate) fn run(
                     &merge_revset.revset,
                     &submit_required,
                     diagnostics,
-                )?;
+                )
+                .await?;
             } else if let Some(sync_required) = find_merge_sync_required(&error) {
                 sync_submit_before_retrying_merge(
                     runner,
@@ -57,10 +63,13 @@ pub(crate) fn run(
                     options.target.as_deref(),
                     &sync_required,
                     diagnostics,
-                )?;
+                )
+                .await?;
             } else if let Some(unfreeze_required) = find_merge_unfreeze_required(&error) {
-                unfreeze_before_retrying_merge(runner, &config, &unfreeze_required, diagnostics)?;
+                unfreeze_before_retrying_merge(runner, &config, &unfreeze_required, diagnostics)
+                    .await?;
                 let sync_revset = effective_sync_revset(runner, Some(&unfreeze_required.target))
+                    .await
                     .map_err(|error| {
                         phase_error("resolve-sync-target", &unfreeze_required.target, error)
                     })?;
@@ -72,11 +81,13 @@ pub(crate) fn run(
                     true,
                     true,
                     diagnostics,
-                )?;
+                )
+                .await?;
             } else {
                 return Err(error);
             }
             merge_revset = effective_merge_revset(runner, options.target.as_deref())
+                .await
                 .map_err(|error| phase_error("resolve-merge-target", target_label, error))?;
             merge_stack(
                 runner,
@@ -86,7 +97,8 @@ pub(crate) fn run(
                 &sync_command,
                 options.admin,
                 diagnostics,
-            )?
+            )
+            .await?
         }
         Err(error) => return Err(error),
     };
@@ -98,6 +110,7 @@ pub(crate) fn run(
     // no-target merge already refreshes remaining PRs each iteration.
     if !dry_run && summary.merged_prs > 0 && options.target.is_some() {
         refresh_stack_above_merge(runner, &config, DEFAULT_STACK_REVSET, diagnostics)
+            .await
             .map_err(|error| phase_error("merge-refresh-above", DEFAULT_STACK_REVSET, error))?;
     }
     if verbose {

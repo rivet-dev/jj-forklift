@@ -1,7 +1,7 @@
 use super::super::*;
 use super::*;
 
-pub(crate) fn effective_merge_revset(
+pub(crate) async fn effective_merge_revset(
     runner: &impl CommandRunner,
     target: Option<&str>,
 ) -> Result<MergeRevset> {
@@ -11,7 +11,7 @@ pub(crate) fn effective_merge_revset(
             target: None,
         });
     };
-    let target = resolve_merge_target(runner, target)?;
+    let target = resolve_merge_target(runner, target).await?;
     Ok(MergeRevset {
         revset: merge_revset_for_target(&target.commit_id),
         target: Some(target),
@@ -25,7 +25,7 @@ pub(crate) fn merge_revset_for_target(target_commit: &str) -> String {
     )
 }
 
-pub(crate) fn effective_sync_revset(
+pub(crate) async fn effective_sync_revset(
     runner: &impl CommandRunner,
     target: Option<&str>,
 ) -> Result<SyncRevset> {
@@ -35,7 +35,7 @@ pub(crate) fn effective_sync_revset(
             target: None,
         });
     };
-    let target = resolve_merge_target(runner, target)?;
+    let target = resolve_merge_target(runner, target).await?;
     Ok(SyncRevset {
         revset: merge_revset_for_target(&target.commit_id),
         target: Some(target),
@@ -76,18 +76,19 @@ impl MergeTarget {
     }
 }
 
-pub(crate) fn resolve_merge_target(
+pub(crate) async fn resolve_merge_target(
     runner: &impl CommandRunner,
     target: &str,
 ) -> Result<MergeTarget> {
     let mut github = GitHubContext::resolve(runner)
+        .await
         .context("resolve GitHub repository before resolving merge target")?;
     let parsed = parse_get_target(target, &github.repo)?;
     github.repo = parsed.repo().to_owned();
 
     match &parsed {
         GetTarget::PullRequest { .. } => {
-            let pr = resolve_target_pr(runner, &github, parsed, "merge")?;
+            let pr = resolve_target_pr(runner, &github, parsed, "merge").await?;
             Ok(MergeTarget {
                 input: target.to_owned(),
                 commit_id: pr.head_ref_oid,
@@ -95,14 +96,14 @@ pub(crate) fn resolve_merge_target(
             })
         }
         GetTarget::BranchOrChange { .. } => {
-            match resolve_target_pr(runner, &github, parsed, "merge") {
+            match resolve_target_pr(runner, &github, parsed, "merge").await {
                 Ok(pr) => Ok(MergeTarget {
                     input: target.to_owned(),
                     commit_id: pr.head_ref_oid,
                     pr_number: Some(pr.number),
                 }),
                 Err(pr_error) => {
-                    let commit_id = resolve_single_rev(runner, target).with_context(|| {
+                    let commit_id = resolve_single_rev(runner, target).await.with_context(|| {
                         format!(
                             "merge target `{target}` did not resolve as an open PR target; PR lookup failed with: {pr_error:#}"
                         )
@@ -118,10 +119,10 @@ pub(crate) fn resolve_merge_target(
     }
 }
 
-pub(crate) fn current_change_id(runner: &impl CommandRunner) -> Result<String> {
+pub(crate) async fn current_change_id(runner: &impl CommandRunner) -> Result<String> {
     let template = "change_id ++ \"\\n\"";
     let args = ["log", "--no-graph", "-r", "@", "-T", template];
-    let output = runner.run("jj", &args)?;
+    let output = runner.run("jj", &args).await?;
     if !output.success {
         bail!(
             "failed-command=`{}` error={}",

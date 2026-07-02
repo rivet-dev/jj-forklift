@@ -44,7 +44,7 @@ pub(crate) struct StackResolution {
     pub(crate) frozen_dependencies: Vec<FrozenDependency>,
 }
 
-pub(crate) fn resolve_stack(
+pub(crate) async fn resolve_stack(
     runner: &impl CommandRunner,
     revset: &str,
 ) -> Result<Vec<ResolvedChange>> {
@@ -59,7 +59,7 @@ pub(crate) fn resolve_stack(
             "-T",
             STACK_LOG_TEMPLATE,
         ],
-    )?;
+    ).await?;
     if !output.success {
         bail!(
             "`{}` failed: {}",
@@ -79,27 +79,27 @@ pub(crate) fn resolve_stack(
         );
     }
 
-    parse_stack_log(runner, &output.stdout).context("parse jj stack log")
+    parse_stack_log(runner, &output.stdout).await.context("parse jj stack log")
 }
 
-pub(crate) fn resolve_stack_context(
+pub(crate) async fn resolve_stack_context(
     runner: &impl CommandRunner,
     revset: &str,
 ) -> Result<AppContext> {
-    resolve_single_rev(runner, "trunk()")?;
-    let frozen_bookmarks = frozen_bookmarks(runner)?;
-    let stack = resolve_stack(runner, revset)?;
+    resolve_single_rev(runner, "trunk()").await?;
+    let frozen_bookmarks = frozen_bookmarks(runner).await?;
+    let stack = resolve_stack(runner, revset).await?;
     validate_stack_shape(&stack, revset)?;
-    let stack_resolution = resolve_stack_resolution(runner, stack, frozen_bookmarks)?;
-    let github = GitHubContext::resolve(runner)?;
+    let stack_resolution = resolve_stack_resolution(runner, stack, frozen_bookmarks).await?;
+    let github = GitHubContext::resolve(runner).await?;
 
     Ok(AppContext::new(github, stack_resolution))
 }
 
-pub(crate) fn resolve_single_rev(runner: &impl CommandRunner, rev: &str) -> Result<String> {
+pub(crate) async fn resolve_single_rev(runner: &impl CommandRunner, rev: &str) -> Result<String> {
     let template = "commit_id ++ \"\\n\"";
     let args = ["log", "--no-graph", "-r", rev, "-T", template];
-    let output = runner.run("jj", &args)?;
+    let output = runner.run("jj", &args).await?;
     if !output.success {
         bail!(
             "failed-command=`{}` error={}",
@@ -123,19 +123,22 @@ pub(crate) fn resolve_single_rev(runner: &impl CommandRunner, rev: &str) -> Resu
     }
 }
 
-pub(crate) fn parse_stack_log(
+pub(crate) async fn parse_stack_log(
     runner: &impl CommandRunner,
     stdout: &str,
 ) -> Result<Vec<ResolvedChange>> {
-    stdout
+    let mut changes = Vec::new();
+    for record in stdout
         .split(STACK_RECORD_SEPARATOR)
         .filter(|record| !record.is_empty())
-        .map(|record| parse_stack_record(runner, record))
-        .collect()
+    {
+        changes.push(parse_stack_record(runner, record).await?);
+    }
+    Ok(changes)
 }
 
 #[tracing::instrument(level = "trace", skip_all)]
-pub(crate) fn parse_stack_record(
+pub(crate) async fn parse_stack_record(
     runner: &impl CommandRunner,
     record: &str,
 ) -> Result<ResolvedChange> {
@@ -152,7 +155,7 @@ pub(crate) fn parse_stack_record(
     let empty = serde_json::from_str::<bool>(fields[5]).context("parse empty status")?;
     let conflict = serde_json::from_str::<bool>(fields[6]).context("parse conflict status")?;
     let divergent = serde_json::from_str::<bool>(fields[7]).context("parse divergent status")?;
-    let tree_id = resolve_tree_id(runner, &commit_id)?;
+    let tree_id = resolve_tree_id(runner, &commit_id).await?;
 
     Ok(ResolvedChange {
         change_id,
@@ -182,8 +185,9 @@ pub(crate) fn description_body(description: &str, title: &str) -> String {
 }
 
 #[tracing::instrument(level = "trace", skip_all, fields(commit = %commit_id))]
-pub(crate) fn resolve_tree_id(runner: &impl CommandRunner, commit_id: &str) -> Result<String> {
+pub(crate) async fn resolve_tree_id(runner: &impl CommandRunner, commit_id: &str) -> Result<String> {
     git_run_required(runner, &["show", "-s", "--format=%T", commit_id])
+        .await
         .with_context(|| format!("resolve tree id for commit {commit_id}"))
 }
 
@@ -315,7 +319,7 @@ pub(crate) fn validate_stack_shape(stack: &[ResolvedChange], revset: &str) -> Re
 /// (e.g. a leftover `jj new` between trunk and the root) and the frozen-dep
 /// chain are correctly ignored: any *non-empty* ancestor of the root that is
 /// not in `::trunk()` and not a frozen dependency is the dangerous case.
-pub(crate) fn validate_owned_base(
+pub(crate) async fn validate_owned_base(
     runner: &impl CommandRunner,
     resolution: &StackResolution,
 ) -> Result<()> {
@@ -342,6 +346,7 @@ pub(crate) fn validate_owned_base(
     );
 
     let dangerous = list_commit_ids(runner, &revset)
+        .await
         .context("inspect ancestry below owned stack root for un-merged commits")?;
     if let Some(parent) = dangerous.first() {
         // Keep the diagnosis in the message (not `.reason()`): when this bubbles

@@ -1,7 +1,7 @@
 use super::super::*;
 use super::*;
 
-pub(crate) fn create_pr(
+pub(crate) async fn create_pr(
     runner: &impl CommandRunner,
     github: &GitHubContext,
     plan: &SubmitPlan,
@@ -29,11 +29,11 @@ pub(crate) fn create_pr(
         PR_API_JQ,
     ];
 
-    run_pr_api(runner, &args, "create", &plan.change.change_id, diagnostics)
+    run_pr_api(runner, &args, "create", &plan.change.change_id, diagnostics).await
 }
 
 #[tracing::instrument(skip_all, fields(pr = pr_number))]
-pub(crate) fn update_pr(
+pub(crate) async fn update_pr(
     runner: &impl CommandRunner,
     github: &GitHubContext,
     pr_number: u64,
@@ -59,11 +59,11 @@ pub(crate) fn update_pr(
         PR_API_JQ,
     ];
 
-    run_pr_api(runner, &args, "update", &plan.change.change_id, diagnostics)
+    run_pr_api(runner, &args, "update", &plan.change.change_id, diagnostics).await
 }
 
 #[tracing::instrument(skip_all, fields(action = %action, change = %change_id))]
-pub(crate) fn run_pr_api(
+pub(crate) async fn run_pr_api(
     runner: &impl CommandRunner,
     args: &[&str],
     action: &str,
@@ -71,7 +71,7 @@ pub(crate) fn run_pr_api(
     diagnostics: Diagnostics,
 ) -> Result<GhPr> {
     diagnostics.command("gh", args);
-    let output = gh_run(runner, args)?;
+    let output = gh_run(runner, args).await?;
     if !output.success {
         bail!(
             "phase=github-pr-{action} object=change:{change_id} failed-api=`{}` error={} safe-next-command=`forklift submit --dry-run`",

@@ -1,7 +1,7 @@
 use super::super::cli::*;
 use super::super::*;
 
-pub(crate) fn run(
+pub(crate) async fn run(
     runner: &impl CommandRunner,
     config: &AppConfig,
     options: SyncOptions,
@@ -12,7 +12,7 @@ pub(crate) fn run(
     // `--unfreeze` adopts every frozen dependency first so the rebase below
     // treats those imported commits as owned and carries them onto trunk too.
     if options.unfreeze {
-        let unfrozen = unfreeze_all_dependencies(runner, config, diagnostics)?;
+        let unfrozen = unfreeze_all_dependencies(runner, config, diagnostics).await?;
         ui_progress(
             "Unfreezing",
             &format!(
@@ -25,7 +25,8 @@ pub(crate) fn run(
     // With no explicit target and without `--current`, sync every tracked stack
     // (like `gt sync`) instead of only the stack containing `@`.
     if options.target.is_none() && !options.current {
-        let summary = sync_all_stacks(runner, &config, options.submit, options.yes, diagnostics)?;
+        let summary =
+            sync_all_stacks(runner, &config, options.submit, options.yes, diagnostics).await?;
         let verb = if dry_run { "sync (dry run)" } else { "sync" };
         let failed_note = if summary.failed > 0 {
             format!(", {} stack(s) failed", summary.failed)
@@ -66,6 +67,7 @@ pub(crate) fn run(
 
     let target_label = options.target.as_deref().unwrap_or(DEFAULT_STACK_REVSET);
     let sync_revset = effective_sync_revset(runner, options.target.as_deref())
+        .await
         .map_err(|error| phase_error("resolve-sync-target", target_label, error))?;
     let summary = sync_stack(
         runner,
@@ -75,7 +77,8 @@ pub(crate) fn run(
         options.submit,
         options.yes,
         diagnostics,
-    )?;
+    )
+    .await?;
     if dry_run {
         ui_progress(
             "Finished",
@@ -111,15 +114,16 @@ pub(crate) fn run(
 /// Adopt every frozen dependency bookmark so its commits become mutable and
 /// owned, then return how many were unfrozen. Each is run through the same
 /// adoption as `forklift unfreeze <pr>`, lowest PR first.
-fn unfreeze_all_dependencies(
+async fn unfreeze_all_dependencies(
     runner: &impl CommandRunner,
     config: &AppConfig,
     diagnostics: Diagnostics,
 ) -> Result<usize> {
     let frozen = frozen_bookmarks(runner)
+        .await
         .map_err(|error| phase_error("unfreeze-deps", "frozen bookmarks", error))?;
     for bookmark in &frozen {
-        unfreeze_stack(runner, config, &bookmark.pr_number.to_string(), diagnostics)?;
+        unfreeze_stack(runner, config, &bookmark.pr_number.to_string(), diagnostics).await?;
     }
     Ok(frozen.len())
 }

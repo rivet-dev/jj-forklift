@@ -7,7 +7,7 @@ use super::*;
 /// of `gt sync` operating over all tracked branches rather than just the one
 /// containing `@`.
 #[tracing::instrument(skip_all)]
-pub(crate) fn sync_all_stacks(
+pub(crate) async fn sync_all_stacks(
     runner: &impl CommandRunner,
     config: &AppConfig,
     submit: bool,
@@ -15,6 +15,7 @@ pub(crate) fn sync_all_stacks(
     diagnostics: Diagnostics,
 ) -> Result<SyncAllSummary> {
     let heads = tracked_stack_heads(runner, config)
+        .await
         .map_err(|error| phase_error("resolve-stacks", "tracked stacks", error))?;
 
     // No tracked stack sits above trunk (e.g. an empty `@` on trunk). Fall back
@@ -29,7 +30,8 @@ pub(crate) fn sync_all_stacks(
             submit,
             yes,
             diagnostics,
-        )?;
+        )
+        .await?;
         let mut aggregate = SyncAllSummary::default();
         aggregate.add(&summary);
         return Ok(aggregate);
@@ -52,7 +54,7 @@ pub(crate) fn sync_all_stacks(
         // resolve here; jj's own error then explains how to abandon the extra
         // copy. We don't try to auto-resolve divergence.
         let revset = merge_revset_for_target(head);
-        match sync_stack(runner, config, &revset, None, submit, yes, diagnostics) {
+        match sync_stack(runner, config, &revset, None, submit, yes, diagnostics).await {
             Ok(summary) => {
                 aggregate.add(&summary);
                 aggregate.stacks += 1;
@@ -90,7 +92,7 @@ pub(crate) fn sync_all_stacks(
 /// sync performs on it. Duplicates (e.g. a divergent change surfacing twice) are
 /// removed so each stack is attempted once.
 #[tracing::instrument(skip_all)]
-pub(crate) fn tracked_stack_heads(
+pub(crate) async fn tracked_stack_heads(
     runner: &impl CommandRunner,
     config: &AppConfig,
 ) -> Result<Vec<String>> {
@@ -100,7 +102,7 @@ pub(crate) fn tracked_stack_heads(
     );
     let template = "json(change_id) ++ \"\\n\"";
     let args = ["log", "--no-graph", "-r", &revset, "-T", template];
-    let output = runner.run("jj", &args)?;
+    let output = runner.run("jj", &args).await?;
     if !output.success {
         bail!(
             "failed-command=`{}` error={}",
@@ -120,7 +122,7 @@ pub(crate) fn tracked_stack_heads(
     Ok(heads)
 }
 
-pub(crate) fn sync_stack(
+pub(crate) async fn sync_stack(
     runner: &impl CommandRunner,
     config: &AppConfig,
     revset: &str,
@@ -131,23 +133,29 @@ pub(crate) fn sync_stack(
 ) -> Result<SyncSummary> {
     diagnostics.phase("sync-fetch");
     fetch_remote(runner, config, diagnostics)
+        .await
         .map_err(|error| phase_error("sync-fetch", &config.remote, error))?;
 
     // Remove stack branches whose commits already landed in trunk (e.g. merged
     // by a prior `forklift merge` or directly on GitHub). Done before resolving
     // the stack so it still runs when no owned stack remains after a merge.
     let cleaned_branches = cleanup_landed_branches(runner, config, diagnostics)
+        .await
         .map_err(|error| phase_error("cleanup-merged", "branches", error))?;
 
     diagnostics.phase("resolve-stack");
     resolve_single_rev(runner, "trunk()")
+        .await
         .map_err(|error| phase_error("resolve-stack", "trunk()", error))?;
     let frozen_bookmarks = frozen_bookmarks(runner)
+        .await
         .map_err(|error| phase_error("resolve-stack", "frozen-bookmarks", error))?;
     let mut stack = resolve_stack(runner, revset)
+        .await
         .map_err(|error| phase_error("resolve-stack", revset, error))?;
     let pruned_duplicate_commits =
         prune_landed_duplicate_changes(runner, config, &stack, diagnostics)
+            .await
             .map_err(|error| phase_error("resolve-stack", revset, error))?;
     let pruned_duplicates = pruned_duplicate_commits.len();
     if pruned_duplicates > 0 {
@@ -159,6 +167,7 @@ pub(crate) fn sync_stack(
             stack.retain(|change| !pruned.contains(change.commit_id.as_str()));
         } else {
             stack = resolve_stack(runner, revset)
+                .await
                 .map_err(|error| phase_error("resolve-stack", revset, error))?;
         }
     }
@@ -168,8 +177,10 @@ pub(crate) fn sync_stack(
     if stack.is_empty() && frozen_bookmarks.is_empty() {
         diagnostics.phase("move-trunk");
         move_trunk_to_remote(runner, config, diagnostics)
+            .await
             .map_err(|error| phase_error("move-trunk", &config.trunk, error))?;
         carry_empty_working_copy_to_trunk(runner, config, diagnostics)
+            .await
             .map_err(|error| phase_error("carry-working-copy", "@", error))?;
         return Ok(SyncSummary {
             rebased_roots: 0,
@@ -180,12 +191,12 @@ pub(crate) fn sync_stack(
         });
     }
     let stack_resolution = if stack.is_empty() {
-        resolve_purely_frozen_stack(runner, frozen_bookmarks)
+        resolve_purely_frozen_stack(runner, frozen_bookmarks).await
     } else {
-        (|| {
-            validate_stack_shape(&stack, revset)?;
-            resolve_stack_resolution(runner, stack, frozen_bookmarks)
-        })()
+        match validate_stack_shape(&stack, revset) {
+            Ok(()) => resolve_stack_resolution(runner, stack, frozen_bookmarks).await,
+            Err(error) => Err(error),
+        }
     }
     .map_err(|error| phase_error("resolve-stack", revset, error))?;
     if diagnostics.verbose {
@@ -203,12 +214,15 @@ pub(crate) fn sync_stack(
     diagnostics.phase("sync-frozen");
     let frozen_refresh =
         sync_refresh_frozen_dependencies(runner, config, &stack_resolution, diagnostics)
+            .await
             .map_err(|error| phase_error("sync-frozen", "frozen dependencies", error))?;
 
     diagnostics.phase("move-trunk");
     move_trunk_to_remote(runner, config, diagnostics)
+        .await
         .map_err(|error| phase_error("move-trunk", &config.trunk, error))?;
     carry_empty_working_copy_to_trunk(runner, config, diagnostics)
+        .await
         .map_err(|error| phase_error("carry-working-copy", "@", error))?;
 
     if stack_resolution.owned.is_empty() {
@@ -235,8 +249,9 @@ pub(crate) fn sync_stack(
             destination,
             diagnostics,
         )
+        .await
     } else {
-        rebase_stack_roots(runner, &stack_resolution.owned, destination, diagnostics)
+        rebase_stack_roots(runner, &stack_resolution.owned, destination, diagnostics).await
     }
     .map_err(|error| phase_error("rebase-stack", revset, error))?;
 
@@ -244,6 +259,7 @@ pub(crate) fn sync_stack(
         0
     } else {
         report_sync_conflicts(runner, &submit_revset)
+            .await
             .map_err(|error| phase_error("resolve-stack", &submit_revset, error))?
     };
 
@@ -277,6 +293,7 @@ pub(crate) fn sync_stack(
 
     diagnostics.phase("sync-submit");
     let mut context = resolve_stack_context(runner, &submit_revset)
+        .await
         .map_err(|error| phase_error("sync-submit", &submit_revset, error))?;
     if let Some(github) = frozen_refresh.github {
         context.github = github;
@@ -293,6 +310,7 @@ pub(crate) fn sync_stack(
         "forklift sync --submit --yes",
         diagnostics,
     )
+    .await
     .map_err(|error| phase_error("sync-submit", "submit", error))?;
 
     Ok(SyncSummary {
@@ -304,7 +322,7 @@ pub(crate) fn sync_stack(
     })
 }
 
-pub(crate) fn prune_landed_duplicate_changes(
+pub(crate) async fn prune_landed_duplicate_changes(
     runner: &impl CommandRunner,
     config: &AppConfig,
     stack: &[ResolvedChange],
@@ -312,7 +330,7 @@ pub(crate) fn prune_landed_duplicate_changes(
 ) -> Result<Vec<String>> {
     let mut landed_duplicates = Vec::new();
     for change in stack {
-        let landed_commits = landed_change_commits(runner, config, &change.change_id)?;
+        let landed_commits = landed_change_commits(runner, config, &change.change_id).await?;
         if landed_commits
             .iter()
             .any(|commit_id| commit_id != &change.commit_id)
@@ -348,7 +366,7 @@ pub(crate) fn prune_landed_duplicate_changes(
     }
 
     diagnostics.command("jj", &args);
-    let output = runner.run("jj", &args)?;
+    let output = runner.run("jj", &args).await?;
     if !output.success {
         bail!(
             "failed-command=`{}` error={}",
@@ -363,7 +381,7 @@ pub(crate) fn prune_landed_duplicate_changes(
         .collect())
 }
 
-fn landed_change_commits(
+async fn landed_change_commits(
     runner: &impl CommandRunner,
     config: &AppConfig,
     change_id: &str,
@@ -377,7 +395,7 @@ fn landed_change_commits(
         "-T",
         "commit_id ++ \"\\n\"",
     ];
-    let output = runner.run("jj", &args)?;
+    let output = runner.run("jj", &args).await?;
     if !output.success {
         bail!(
             "failed-command=`{}` error={}",
@@ -414,8 +432,8 @@ pub(crate) fn prompt_submit_after_sync(
 }
 
 #[tracing::instrument(skip_all, fields(revset = %revset))]
-pub(crate) fn report_sync_conflicts(runner: &impl CommandRunner, revset: &str) -> Result<usize> {
-    let stack = resolve_stack(runner, revset)?;
+pub(crate) async fn report_sync_conflicts(runner: &impl CommandRunner, revset: &str) -> Result<usize> {
+    let stack = resolve_stack(runner, revset).await?;
     let conflicts = stack
         .iter()
         .filter(|change| change.conflict)
@@ -435,7 +453,7 @@ pub(crate) struct SyncFrozenRefresh {
     active_dependencies: bool,
 }
 
-pub(crate) fn sync_refresh_frozen_dependencies(
+pub(crate) async fn sync_refresh_frozen_dependencies(
     runner: &impl CommandRunner,
     config: &AppConfig,
     stack_resolution: &StackResolution,
@@ -449,6 +467,7 @@ pub(crate) fn sync_refresh_frozen_dependencies(
     }
 
     let github = GitHubContext::resolve(runner)
+        .await
         .context("resolve GitHub repository for frozen dependencies")?;
     let mut prs = Vec::new();
     for dependency in &stack_resolution.frozen_dependencies {
@@ -457,7 +476,8 @@ pub(crate) fn sync_refresh_frozen_dependencies(
             &github,
             "sync-frozen",
             dependency.bookmark.pr_number,
-        )?;
+        )
+        .await?;
         prs.push(pr);
     }
     let active_dependencies = validate_sync_frozen_pr_stack(
@@ -474,8 +494,9 @@ pub(crate) fn sync_refresh_frozen_dependencies(
     }
 
     fetch_get_branches(runner, config, &prs, diagnostics)
+        .await
         .map_err(|error| anyhow!("fetch frozen dependency branches: {error}"))?;
-    update_get_frozen_bookmarks(runner, &prs, diagnostics)?;
+    update_get_frozen_bookmarks(runner, &prs, diagnostics).await?;
     Ok(SyncFrozenRefresh {
         github: Some(github),
         active_dependencies: true,
@@ -625,7 +646,7 @@ pub(crate) fn validate_sync_frozen_pr_metadata(
 /// Conservative: only a conflict-free empty working copy with a single
 /// parent that is now strictly behind trunk, and no children, is moved — an
 /// empty rev sitting on a stack change already followed the stack rebase.
-pub(crate) fn carry_empty_working_copy_to_trunk(
+pub(crate) async fn carry_empty_working_copy_to_trunk(
     runner: &impl CommandRunner,
     config: &AppConfig,
     diagnostics: Diagnostics,
@@ -641,7 +662,8 @@ pub(crate) fn carry_empty_working_copy_to_trunk(
             "-T",
             r#"if(empty, "true", "false") ++ "\t" ++ if(conflict, "true", "false") ++ "\t" ++ parents.map(|c| c.commit_id()).join(",")"#,
         ],
-    )?;
+    )
+    .await?;
     let mut fields = info.split('\t');
     let empty = fields.next() == Some("true");
     let conflict = fields.next() == Some("true");
@@ -657,14 +679,14 @@ pub(crate) fn carry_empty_working_copy_to_trunk(
     if !empty || conflict {
         return Ok(());
     }
-    let trunk_tip = resolve_single_rev(runner, &config.trunk)?;
+    let trunk_tip = resolve_single_rev(runner, &config.trunk).await?;
     if *parent == trunk_tip {
         return Ok(());
     }
-    if list_commit_ids(runner, &format!("{parent} & ::{trunk_tip}"))?.is_empty() {
+    if list_commit_ids(runner, &format!("{parent} & ::{trunk_tip}")).await?.is_empty() {
         return Ok(());
     }
-    if !list_commit_ids(runner, "children(@)")?.is_empty() {
+    if !list_commit_ids(runner, "children(@)").await?.is_empty() {
         return Ok(());
     }
 
@@ -678,7 +700,7 @@ pub(crate) fn carry_empty_working_copy_to_trunk(
         return Ok(());
     }
     diagnostics.command("jj", &args);
-    let output = runner.run("jj", &args)?;
+    let output = runner.run("jj", &args).await?;
     if !output.success {
         bail!(
             "failed-command=`{}` error={}",
@@ -689,16 +711,16 @@ pub(crate) fn carry_empty_working_copy_to_trunk(
     Ok(())
 }
 
-pub(crate) fn fetch_remote(
+pub(crate) async fn fetch_remote(
     runner: &impl CommandRunner,
     config: &AppConfig,
     diagnostics: Diagnostics,
 ) -> Result<()> {
     let args = ["git", "fetch", "--remote", config.remote.as_str()];
-    run_fetch_remote_command(runner, config, diagnostics, &args)
+    run_fetch_remote_command(runner, config, diagnostics, &args).await
 }
 
-pub(crate) fn fetch_remote_preserving_local_commits(
+pub(crate) async fn fetch_remote_preserving_local_commits(
     runner: &impl CommandRunner,
     config: &AppConfig,
     diagnostics: Diagnostics,
@@ -711,10 +733,10 @@ pub(crate) fn fetch_remote_preserving_local_commits(
         "--remote",
         config.remote.as_str(),
     ];
-    run_fetch_remote_command(runner, config, diagnostics, &args)
+    run_fetch_remote_command(runner, config, diagnostics, &args).await
 }
 
-fn run_fetch_remote_command(
+async fn run_fetch_remote_command(
     runner: &impl CommandRunner,
     config: &AppConfig,
     diagnostics: Diagnostics,
@@ -726,7 +748,7 @@ fn run_fetch_remote_command(
     }
 
     diagnostics.command("jj", args);
-    let output = runner.run("jj", args)?;
+    let output = runner.run("jj", args).await?;
     if !output.success {
         bail!(
             "failed-command=`{}` error={}",
@@ -740,7 +762,7 @@ fn run_fetch_remote_command(
     // remote name or a fetch that exits 0 without updating refs fails loudly here
     // instead of later as a confusing trunk-movement error.
     let remote_jj_ref = remote_jj_ref(config);
-    jj_trunk_remote_commit(runner, config).map_err(|error| {
+    jj_trunk_remote_commit(runner, config).await.map_err(|error| {
         anyhow!(
             "`{}` reported success but `{remote_jj_ref}` is not resolvable; check {CONFIG_PREFIX}.remote and {CONFIG_PREFIX}.trunk: {error}",
             display_command("jj", args)
@@ -754,7 +776,7 @@ fn run_fetch_remote_command(
 /// sees it. This is the authority jj uses when it moves the local trunk bookmark
 /// and rebases, so trunk movement must be based on it rather than the colocated
 /// git ref, which can lag in a non-colocated repo.
-pub(crate) fn jj_trunk_remote_commit(
+pub(crate) async fn jj_trunk_remote_commit(
     runner: &impl CommandRunner,
     config: &AppConfig,
 ) -> Result<String> {
@@ -771,17 +793,18 @@ pub(crate) fn jj_trunk_remote_commit(
             "commit_id",
         ],
     )
+    .await
     .with_context(|| format!("resolve jj remote trunk bookmark `{remote_jj_ref}`"))
 }
 
-pub(crate) fn move_trunk_to_remote(
+pub(crate) async fn move_trunk_to_remote(
     runner: &impl CommandRunner,
     config: &AppConfig,
     diagnostics: Diagnostics,
 ) -> Result<()> {
-    let local = git_rev_parse(runner, &config.trunk)?;
+    let local = git_rev_parse(runner, &config.trunk).await?;
     let remote_git_ref = remote_git_ref(config);
-    let remote = git_rev_parse(runner, &remote_git_ref)?;
+    let remote = git_rev_parse(runner, &remote_git_ref).await?;
 
     // jj moves the local trunk bookmark and rebases against its own view of the
     // remote bookmark (`<trunk>@<remote>`). In a non-colocated repo
@@ -789,7 +812,7 @@ pub(crate) fn move_trunk_to_remote(
     // local==remote check below a false positive and silently skip trunk
     // movement. Require the two views to agree so we never base trunk movement on
     // a stale git ref.
-    let remote_jj = jj_trunk_remote_commit(runner, config)?;
+    let remote_jj = jj_trunk_remote_commit(runner, config).await?;
     if remote_jj != remote {
         bail!(
             CliError::new(format!(
@@ -810,7 +833,7 @@ pub(crate) fn move_trunk_to_remote(
         return Ok(());
     }
 
-    let stranded_recovery = if trunk_can_fast_forward(runner, &local, &remote)? {
+    let stranded_recovery = if trunk_can_fast_forward(runner, &local, &remote).await? {
         false
     } else {
         // A merge push that failed after moving the trunk bookmark (e.g. the
@@ -822,7 +845,8 @@ pub(crate) fn move_trunk_to_remote(
         // The cover set must be built from bookmark *names* — `bookmarks() ~
         // bookmarks(exact:<trunk>)` is a commit-set difference, and the stack
         // top carries both trunk and its stack bookmark, so it would drop out.
-        let covers = local_bookmark_names(runner)?
+        let covers = local_bookmark_names(runner)
+            .await?
             .into_iter()
             .filter(|name| name != &config.trunk)
             .map(|name| format!("bookmarks(exact:\"{name}\")"))
@@ -833,7 +857,7 @@ pub(crate) fn move_trunk_to_remote(
         } else {
             format!("::{local} ~ ::{remote} ~ ::({covers})")
         };
-        let uncovered = list_commit_ids(runner, &uncovered_revset)?;
+        let uncovered = list_commit_ids(runner, &uncovered_revset).await?;
         if !uncovered.is_empty() {
             bail!(CliError::new(format!(
                 "trunk `{}` cannot fast-forward to `{}`: local commit {}, remote commit {}",
@@ -878,7 +902,7 @@ pub(crate) fn move_trunk_to_remote(
         );
     }
     diagnostics.command("jj", &args);
-    let output = runner.run("jj", &args)?;
+    let output = runner.run("jj", &args).await?;
     if !output.success {
         bail!(
             "failed-command=`{}` error={}",
@@ -891,11 +915,11 @@ pub(crate) fn move_trunk_to_remote(
 }
 
 #[tracing::instrument(skip_all, fields(local = %local, remote = %remote))]
-pub(crate) fn trunk_can_fast_forward(
+pub(crate) async fn trunk_can_fast_forward(
     runner: &impl CommandRunner,
     local: &str,
     remote: &str,
 ) -> Result<bool> {
     let args = ["merge-base", "--is-ancestor", local, remote];
-    Ok(git_run(runner, &args)?.success)
+    Ok(git_run(runner, &args).await?.success)
 }

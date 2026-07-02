@@ -16,13 +16,13 @@ pub(crate) struct OrphanedPr {
     pub(crate) host_commit_id: String,
 }
 
-pub(crate) fn validate_submit_bookmark_state(
+pub(crate) async fn validate_submit_bookmark_state(
     runner: &impl CommandRunner,
     config: &AppConfig,
     change: &ResolvedChange,
     entry: &PrCacheEntry,
 ) -> Result<()> {
-    let local_target = jj_ref_commit_id(runner, &entry.head_branch).with_context(|| {
+    let local_target = jj_ref_commit_id(runner, &entry.head_branch).await.with_context(|| {
         format!(
             "local head bookmark `{}` is missing or conflicted",
             entry.head_branch
@@ -34,7 +34,7 @@ pub(crate) fn validate_submit_bookmark_state(
         // carry the bookmark). That is safe: the push phase re-points the
         // bookmark onto the selected copy with `jj bookmark set`. Only bail when
         // the bookmark sits on an unrelated change.
-        let local_change_id = jj_ref_change_id(runner, &entry.head_branch).with_context(|| {
+        let local_change_id = jj_ref_change_id(runner, &entry.head_branch).await.with_context(|| {
             format!(
                 "resolve change id for local head bookmark `{}`",
                 entry.head_branch
@@ -52,7 +52,7 @@ pub(crate) fn validate_submit_bookmark_state(
         }
     }
 
-    let remote = remote_bookmark_status(runner, config, &entry.head_branch)?;
+    let remote = remote_bookmark_status(runner, config, &entry.head_branch).await?;
     if !remote.tracked {
         bail!(
             CliError::new(format!(
@@ -76,7 +76,7 @@ pub(crate) fn validate_submit_bookmark_state(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn resolve_submit_head_branch(
+pub(crate) async fn resolve_submit_head_branch(
     runner: &impl CommandRunner,
     config: &AppConfig,
     used_head_branches: &mut HashSet<String>,
@@ -93,14 +93,16 @@ pub(crate) fn resolve_submit_head_branch(
         &context.github,
         change,
         orphans,
-    )? {
+    )
+    .await?
+    {
         return Ok(discovered);
     }
 
     // A branch the user adopted with `forklift track <branch>` lives as a real
     // local bookmark on the change's commit — the durable source of truth, no
     // cache required. Prefer it as the PR head over a generated `stack/*` name.
-    if let Some(adopted) = adopted_head_bookmark_for_change(runner, config, change)? {
+    if let Some(adopted) = adopted_head_bookmark_for_change(runner, config, change).await? {
         if !used_head_branches.contains(&adopted) {
             return resolve_submit_pending_head_branch(
                 runner,
@@ -109,7 +111,8 @@ pub(crate) fn resolve_submit_head_branch(
                 &context.github,
                 change,
                 &adopted,
-            );
+            )
+            .await;
         }
     }
 
@@ -122,7 +125,9 @@ pub(crate) fn resolve_submit_head_branch(
             &context.github,
             change,
             entry,
-        ) {
+        )
+        .await
+        {
             Ok(resolved) => return Ok(resolved),
             Err(error) => {
                 diagnostics.warn(format!(
@@ -135,11 +140,12 @@ pub(crate) fn resolve_submit_head_branch(
 
     let head_branch = deterministic_head_branch(config, change, used_head_branches);
     let existing_pr =
-        lookup_open_pr_by_head_branch(runner, &context.github, &change.change_id, &head_branch)?;
-    let expected_remote_head = remote_head_oid(runner, &config.remote, &head_branch)?;
+        lookup_open_pr_by_head_branch(runner, &context.github, &change.change_id, &head_branch)
+            .await?;
+    let expected_remote_head = remote_head_oid(runner, &config.remote, &head_branch).await?;
 
     if let Some(existing_pr) = existing_pr {
-        validate_submit_bookmark_state(runner, config, change, &existing_pr)?;
+        validate_submit_bookmark_state(runner, config, change, &existing_pr).await?;
         used_head_branches.insert(head_branch.clone());
         return Ok((head_branch, Some(existing_pr), expected_remote_head));
     }
@@ -160,7 +166,7 @@ pub(crate) fn resolve_submit_head_branch(
 }
 
 #[tracing::instrument(skip_all, fields(change = %change.change_id))]
-pub(crate) fn resolve_submit_cached_head_branch(
+pub(crate) async fn resolve_submit_cached_head_branch(
     runner: &impl CommandRunner,
     config: &AppConfig,
     used_head_branches: &mut HashSet<String>,
@@ -172,9 +178,9 @@ pub(crate) fn resolve_submit_cached_head_branch(
     if used_head_branches.contains(&head_branch) {
         bail!("cache records duplicate head branch `{head_branch}` in stack");
     }
-    validate_submit_bookmark_state(runner, config, change, entry)?;
-    let existing_pr = lookup_cached_pr(runner, github, &change.change_id, &head_branch, entry)?;
-    let expected_remote_head = remote_head_oid(runner, &config.remote, &head_branch)?;
+    validate_submit_bookmark_state(runner, config, change, entry).await?;
+    let existing_pr = lookup_cached_pr(runner, github, &change.change_id, &head_branch, entry).await?;
+    let expected_remote_head = remote_head_oid(runner, &config.remote, &head_branch).await?;
     used_head_branches.insert(head_branch.clone());
     Ok((head_branch, Some(existing_pr), expected_remote_head))
 }
@@ -185,7 +191,7 @@ pub(crate) fn resolve_submit_cached_head_branch(
 /// deterministic path, an existing remote branch is not treated as a collision —
 /// it is the user's deliberately tracked branch.
 #[tracing::instrument(skip_all, fields(change = %change.change_id))]
-pub(crate) fn resolve_submit_pending_head_branch(
+pub(crate) async fn resolve_submit_pending_head_branch(
     runner: &impl CommandRunner,
     config: &AppConfig,
     used_head_branches: &mut HashSet<String>,
@@ -197,17 +203,17 @@ pub(crate) fn resolve_submit_pending_head_branch(
         bail!("cache records duplicate head branch `{head_branch}` in stack");
     }
     let existing_pr =
-        lookup_open_pr_by_head_branch(runner, github, &change.change_id, head_branch)?;
+        lookup_open_pr_by_head_branch(runner, github, &change.change_id, head_branch).await?;
     if let Some(existing_pr) = &existing_pr {
-        validate_submit_bookmark_state(runner, config, change, existing_pr)?;
+        validate_submit_bookmark_state(runner, config, change, existing_pr).await?;
     }
-    let expected_remote_head = remote_head_oid(runner, &config.remote, head_branch)?;
+    let expected_remote_head = remote_head_oid(runner, &config.remote, head_branch).await?;
     used_head_branches.insert(head_branch.to_owned());
     Ok((head_branch.to_owned(), existing_pr, expected_remote_head))
 }
 
 #[tracing::instrument(skip_all, fields(change = %change.change_id))]
-pub(crate) fn discover_existing_pr_from_local_bookmarks(
+pub(crate) async fn discover_existing_pr_from_local_bookmarks(
     runner: &impl CommandRunner,
     config: &AppConfig,
     used_head_branches: &mut HashSet<String>,
@@ -216,12 +222,12 @@ pub(crate) fn discover_existing_pr_from_local_bookmarks(
     orphans: &mut Vec<OrphanedPr>,
 ) -> Result<Option<(String, Option<PrCacheEntry>, Option<String>)>> {
     let mut matches = Vec::new();
-    for head_branch in local_stack_bookmarks_for_change(runner, config, change)? {
+    for head_branch in local_stack_bookmarks_for_change(runner, config, change).await? {
         if used_head_branches.contains(&head_branch) {
             continue;
         }
         if let Some(existing_pr) =
-            lookup_open_pr_by_head_branch(runner, github, &change.change_id, &head_branch)?
+            lookup_open_pr_by_head_branch(runner, github, &change.change_id, &head_branch).await?
         {
             matches.push((head_branch, existing_pr));
         }
@@ -230,8 +236,8 @@ pub(crate) fn discover_existing_pr_from_local_bookmarks(
     match matches.as_slice() {
         [] => Ok(None),
         [(head_branch, existing_pr)] => {
-            validate_submit_bookmark_state(runner, config, change, existing_pr)?;
-            let expected_remote_head = remote_head_oid(runner, &config.remote, head_branch)?;
+            validate_submit_bookmark_state(runner, config, change, existing_pr).await?;
+            let expected_remote_head = remote_head_oid(runner, &config.remote, head_branch).await?;
             used_head_branches.insert(head_branch.clone());
             Ok(Some((
                 head_branch.clone(),
@@ -239,14 +245,17 @@ pub(crate) fn discover_existing_pr_from_local_bookmarks(
                 expected_remote_head,
             )))
         }
-        _ => resolve_collapsed_bookmark_matches(
-            runner,
-            config,
-            change,
-            matches,
-            used_head_branches,
-            orphans,
-        ),
+        _ => {
+            resolve_collapsed_bookmark_matches(
+                runner,
+                config,
+                change,
+                matches,
+                used_head_branches,
+                orphans,
+            )
+            .await
+        }
     }
 }
 
@@ -256,7 +265,7 @@ pub(crate) fn discover_existing_pr_from_local_bookmarks(
 /// owner; the rest are orphans from changes that got absorbed by a rebase/squash.
 /// We proceed with the canonical bookmark and record the orphans for cleanup.
 /// Only when exactly one canonical bookmark can't be identified do we bail.
-fn resolve_collapsed_bookmark_matches(
+async fn resolve_collapsed_bookmark_matches(
     runner: &impl CommandRunner,
     config: &AppConfig,
     change: &ResolvedChange,
@@ -293,8 +302,8 @@ fn resolve_collapsed_bookmark_matches(
     }
 
     let (head_branch, existing_pr) = owned.pop().expect("exactly one canonical bookmark");
-    validate_submit_bookmark_state(runner, config, change, &existing_pr)?;
-    let expected_remote_head = remote_head_oid(runner, &config.remote, &head_branch)?;
+    validate_submit_bookmark_state(runner, config, change, &existing_pr).await?;
+    let expected_remote_head = remote_head_oid(runner, &config.remote, &head_branch).await?;
     used_head_branches.insert(head_branch.clone());
 
     for (branch, pr) in orphaned {
@@ -317,7 +326,7 @@ fn resolve_collapsed_bookmark_matches(
 }
 
 #[tracing::instrument(skip_all, fields(change = %change.change_id))]
-pub(crate) fn local_stack_bookmarks_for_change(
+pub(crate) async fn local_stack_bookmarks_for_change(
     runner: &impl CommandRunner,
     config: &AppConfig,
     change: &ResolvedChange,
@@ -330,7 +339,7 @@ pub(crate) fn local_stack_bookmarks_for_change(
         "-T",
         LOCAL_BOOKMARK_TEMPLATE,
     ];
-    let output = runner.run("jj", &args)?;
+    let output = runner.run("jj", &args).await?;
     if !output.success {
         bail!(
             "failed-command=`{}` error={}",
@@ -371,7 +380,7 @@ pub(crate) fn local_stack_bookmarks_for_change(
 /// Returns `None` unless there is exactly one such candidate (an ambiguous set
 /// falls back to the deterministic name rather than guessing).
 #[tracing::instrument(skip_all, fields(change = %change.change_id))]
-pub(crate) fn adopted_head_bookmark_for_change(
+pub(crate) async fn adopted_head_bookmark_for_change(
     runner: &impl CommandRunner,
     config: &AppConfig,
     change: &ResolvedChange,
@@ -384,7 +393,7 @@ pub(crate) fn adopted_head_bookmark_for_change(
         "-T",
         LOCAL_BOOKMARK_TEMPLATE,
     ];
-    let output = runner.run("jj", &args)?;
+    let output = runner.run("jj", &args).await?;
     if !output.success {
         bail!(
             "failed-command=`{}` error={}",
@@ -423,7 +432,7 @@ pub(crate) fn adopted_head_bookmark_for_change(
     }
 }
 
-pub(crate) fn submit_stack(
+pub(crate) async fn submit_stack(
     runner: &impl CommandRunner,
     config: &AppConfig,
     context: &AppContext,
@@ -437,6 +446,7 @@ pub(crate) fn submit_stack(
 
     diagnostics.phase("validate-submit-bases");
     validate_submit_bases(runner, config, &context.stack, &context.frozen_dependencies)
+        .await
         .map_err(|error| phase_error("validate-submit-bases", "stack", error))?;
     validate_submit_descriptions(&context.stack)
         .map_err(|error| phase_error("validate-submit-bases", "stack", error))?;
@@ -444,6 +454,7 @@ pub(crate) fn submit_stack(
     tracing::debug!(phase = "plan-submit", "recovery phase");
     let plan_progress = diagnostics.progress_bar("Planning", "submit", context.stack.len());
     let mut store = CacheStore::load_current_best_effort(runner, diagnostics, "plan-submit")
+        .await
         .map_err(|error| phase_error("plan-submit", "cache", error))?;
     diagnostics.repo_details(&store);
     let frozen_entries = resolve_submit_frozen_dependency_entries(
@@ -452,6 +463,7 @@ pub(crate) fn submit_stack(
         &context.frozen_dependencies,
         diagnostics,
     )
+    .await
     .map_err(|error| phase_error("plan-submit", "frozen dependencies", error))?;
     let mut plans = Vec::new();
     let mut used_head_branches = HashSet::new();
@@ -475,6 +487,7 @@ pub(crate) fn submit_stack(
             &mut orphaned_prs,
             diagnostics,
         )
+        .await
         .map_err(|error| {
             phase_error("plan-submit", format!("change:{}", change.change_id), error)
         })?;
@@ -567,10 +580,10 @@ pub(crate) fn submit_stack(
     // and leaves the change divergent, so re-pin every plan to its change's
     // current visible commit first (this re-resolve performs the snapshot
     // itself; the push phase below then skips snapshotting entirely).
-    reconcile_plans_with_current_commits(runner, &mut plans)?;
+    reconcile_plans_with_current_commits(runner, &mut plans).await?;
 
     tracing::debug!(phase = "push-refs", "recovery phase");
-    push_changed_heads(runner, config, &plans, diagnostics)?;
+    push_changed_heads(runner, config, &plans, diagnostics).await?;
 
     let mut entries = Vec::new();
 
@@ -583,7 +596,8 @@ pub(crate) fn submit_stack(
         let (action, entry) = match &plan.existing_pr {
             None => (
                 SubmitPrAction::Submit,
-                create_pr(runner, &context.github, &plan, diagnostics)?
+                create_pr(runner, &context.github, &plan, diagnostics)
+                    .await?
                     .into_cache_entry(previous_comment_id),
             ),
             Some(existing) if plan.pr_update_needed => (
@@ -594,7 +608,8 @@ pub(crate) fn submit_stack(
                     existing.pr_number,
                     &plan,
                     diagnostics,
-                )?
+                )
+                .await?
                 .into_cache_entry(previous_comment_id),
             ),
             Some(existing) => (
@@ -646,7 +661,9 @@ pub(crate) fn submit_stack(
             &change.change_id,
             &body,
             diagnostics,
-        )? {
+        )
+        .await?
+        {
             StackCommentAction::Created(comment_id) => {
                 summary.created_comments += 1;
                 entry.stack_comment_id = Some(comment_id);
@@ -679,7 +696,7 @@ pub(crate) fn submit_stack(
 
     if !orphaned_prs.is_empty() {
         summary.closed_orphans =
-            close_orphaned_prs(runner, &context.github, &orphaned_prs, yes, diagnostics)?;
+            close_orphaned_prs(runner, &context.github, &orphaned_prs, yes, diagnostics).await?;
     }
 
     Ok(summary)
@@ -689,7 +706,7 @@ pub(crate) fn submit_stack(
 /// Returns the number of PRs actually closed. Closing a PR is destructive and
 /// outward-facing, so it requires explicit consent: `--yes` (or an interactive
 /// `y`) closes them; a bare non-interactive run leaves them open with a hint.
-fn close_orphaned_prs(
+async fn close_orphaned_prs(
     runner: &impl CommandRunner,
     github: &GitHubContext,
     orphans: &[OrphanedPr],
@@ -711,10 +728,10 @@ fn close_orphaned_prs(
     tracing::debug!(phase = "close-orphans", "recovery phase");
     let progress = diagnostics.progress_bar("Closing", "orphaned PRs", orphans.len());
     for (index, orphan) in orphans.iter().enumerate() {
-        close_orphaned_pr(runner, github, orphan, diagnostics)?;
+        close_orphaned_pr(runner, github, orphan, diagnostics).await?;
         // The PR's remote branch is gone (gh deleted it); forget the local
         // bookmark and its remote-tracking ref so jj stops carrying the strand.
-        forget_bookmark_tracking(runner, &orphan.bookmark, diagnostics);
+        forget_bookmark_tracking(runner, &orphan.bookmark, diagnostics).await;
         if let Some(progress) = &progress {
             progress.set_position((index + 1) as u64);
         }
@@ -725,7 +742,7 @@ fn close_orphaned_prs(
     Ok(orphans.len())
 }
 
-fn close_orphaned_pr(
+async fn close_orphaned_pr(
     runner: &impl CommandRunner,
     github: &GitHubContext,
     orphan: &OrphanedPr,
@@ -741,7 +758,7 @@ fn close_orphaned_pr(
         "--delete-branch",
     ];
     diagnostics.command("gh", &args);
-    let output = gh_run(runner, &args)?;
+    let output = gh_run(runner, &args).await?;
     if !output.success {
         bail!(
             "failed-command=`{}` error={}",
@@ -792,7 +809,7 @@ fn confirm_close_orphans(orphans: &[OrphanedPr], yes: bool) -> Result<bool> {
     Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "YES" | "Yes"))
 }
 
-pub(crate) fn resolve_submit_frozen_dependency_entries(
+pub(crate) async fn resolve_submit_frozen_dependency_entries(
     runner: &impl CommandRunner,
     github: &GitHubContext,
     dependencies: &[FrozenDependency],
@@ -805,7 +822,8 @@ pub(crate) fn resolve_submit_frozen_dependency_entries(
             github,
             &dependency.change.change_id,
             dependency.bookmark.pr_number,
-        )?;
+        )
+        .await?;
         validate_submit_frozen_dependency_pr(github, dependency, &pr)?;
         diagnostics.warn(format!(
             "resolved frozen dependency `{}` to PR #{} head `{}`",
@@ -1141,7 +1159,7 @@ pub(crate) fn refreshed_cache_entry(
 /// past the stack root's fork point — typically because the pre-submit fetch
 /// fast-forwarded it. Submit base validation rejects that state, so the stack
 /// must be rebased onto the new trunk before it can be submitted.
-pub(crate) fn stack_behind_trunk(
+pub(crate) async fn stack_behind_trunk(
     runner: &impl CommandRunner,
     config: &AppConfig,
     context: &AppContext,
@@ -1152,8 +1170,8 @@ pub(crate) fn stack_behind_trunk(
     let Some(root) = context.stack.first() else {
         return Ok(false);
     };
-    let trunk_tip = resolve_single_rev(runner, &config.trunk)?;
-    Ok(merge_base(runner, &root.commit_id, &trunk_tip)? != trunk_tip)
+    let trunk_tip = resolve_single_rev(runner, &config.trunk).await?;
+    Ok(merge_base(runner, &root.commit_id, &trunk_tip).await? != trunk_tip)
 }
 
 /// Ask before submit performs sync's trunk-move + rebase on a stack that fell
@@ -1195,7 +1213,7 @@ pub(crate) fn confirm_sync_before_submit(trunk: &str, yes: bool) -> Result<()> {
         .into())
 }
 
-pub(crate) fn validate_submit_bases(
+pub(crate) async fn validate_submit_bases(
     runner: &impl CommandRunner,
     config: &AppConfig,
     stack: &[ResolvedChange],
@@ -1211,7 +1229,7 @@ pub(crate) fn validate_submit_bases(
         ),
         None => (
             config.trunk.clone(),
-            resolve_single_rev(runner, &config.trunk)?,
+            resolve_single_rev(runner, &config.trunk).await?,
         ),
     };
     // The stack revset excludes empty commits (`~empty()`), so the resolved base
@@ -1221,7 +1239,7 @@ pub(crate) fn validate_submit_bases(
     // fail on those skipped empties. The revset guarantees every *non-empty*
     // commit between the base and the root is already part of the stack, so
     // anything sitting between them here is empty and harmless to submit.
-    let root_merge_base = merge_base(runner, &root.commit_id, &base_tip)?;
+    let root_merge_base = merge_base(runner, &root.commit_id, &base_tip).await?;
     if root_merge_base != base_tip {
         bail!(CliError::new(format!(
             "submit base validation failed for {} ({}): base `{}` ({}) is not an ancestor of the stack root (merge-base is {})",
@@ -1249,7 +1267,8 @@ pub(crate) fn validate_submit_bases(
             base = base_tip,
             root = root.commit_id
         ),
-    )?;
+    )
+    .await?;
     if !undescribed_spacers.is_empty() {
         let revs = undescribed_spacers
             .iter()
@@ -1284,7 +1303,7 @@ pub(crate) fn validate_submit_bases(
             )));
         }
 
-        let merge_base = merge_base(runner, &child.commit_id, &parent.commit_id)?;
+        let merge_base = merge_base(runner, &child.commit_id, &parent.commit_id).await?;
         if merge_base != parent.commit_id {
             bail!(CliError::new(format!(
                 "submit base validation failed for {} ({}): merge-base with parent change {} ({}) is {}",
@@ -1334,10 +1353,10 @@ pub(crate) fn validate_submit_descriptions(stack: &[ResolvedChange]) -> Result<(
 /// vec when nothing matches (unlike [`resolve_single_rev`], which requires
 /// exactly one).
 #[tracing::instrument(level = "trace", skip_all, fields(revset = %revset))]
-pub(crate) fn list_commit_ids(runner: &impl CommandRunner, revset: &str) -> Result<Vec<String>> {
+pub(crate) async fn list_commit_ids(runner: &impl CommandRunner, revset: &str) -> Result<Vec<String>> {
     let template = "commit_id ++ \"\\n\"";
     let args = ["log", "--no-graph", "-r", revset, "-T", template];
-    let output = runner.run("jj", &args)?;
+    let output = runner.run("jj", &args).await?;
     if !output.success {
         bail!(
             "failed-command=`{}` error={}",
@@ -1355,19 +1374,20 @@ pub(crate) fn list_commit_ids(runner: &impl CommandRunner, revset: &str) -> Resu
 }
 
 #[tracing::instrument(level = "trace", skip_all, fields(left = %left, right = %right))]
-pub(crate) fn merge_base(runner: &impl CommandRunner, left: &str, right: &str) -> Result<String> {
+pub(crate) async fn merge_base(runner: &impl CommandRunner, left: &str, right: &str) -> Result<String> {
     git_run_required(runner, &["merge-base", left, right])
+        .await
         .with_context(|| format!("validate merge base between {left} and {right}"))
 }
 
 #[tracing::instrument(skip_all, fields(remote = %remote, branch = %branch))]
-pub(crate) fn remote_head_oid(
+pub(crate) async fn remote_head_oid(
     runner: &impl CommandRunner,
     remote: &str,
     branch: &str,
 ) -> Result<Option<String>> {
     let args = ["ls-remote", "--heads", remote, branch];
-    let output = git_run(runner, &args)?;
+    let output = git_run(runner, &args).await?;
     if !output.success {
         bail!(
             "`{}` failed while resolving remote head `{}`: {}",
@@ -1406,12 +1426,12 @@ pub(crate) fn remote_head_oid(
 /// divergent. A change that was benignly rewritten is re-pinned (and pushed)
 /// with a warning; a change that disappeared or became divergent aborts the
 /// submit before anything is pushed.
-pub(crate) fn reconcile_plans_with_current_commits(
+pub(crate) async fn reconcile_plans_with_current_commits(
     runner: &impl CommandRunner,
     plans: &mut [SubmitPlan],
 ) -> Result<()> {
     for plan in plans.iter_mut() {
-        let current = list_commit_ids(runner, &format!("change_id({})", plan.change.change_id))?;
+        let current = list_commit_ids(runner, &format!("change_id({})", plan.change.change_id)).await?;
         // A plan whose commit is still visible is fine as-is — including the
         // deliberately selected copy of an already-divergent change.
         if current.iter().any(|commit| *commit == plan.change.commit_id) {
@@ -1456,7 +1476,7 @@ pub(crate) fn reconcile_plans_with_current_commits(
     Ok(())
 }
 
-pub(crate) fn push_changed_heads(
+pub(crate) async fn push_changed_heads(
     runner: &impl CommandRunner,
     config: &AppConfig,
     plans: &[SubmitPlan],
@@ -1472,9 +1492,9 @@ pub(crate) fn push_changed_heads(
 
     let progress = diagnostics.progress_bar("Pushing", "bookmarks", changed.len());
     for (index, plan) in changed.iter().enumerate() {
-        set_submit_bookmark(runner, plan, diagnostics)?;
-        push_submit_bookmark(runner, config, plan, diagnostics)?;
-        verify_submit_bookmark_pushed(runner, config, plan)?;
+        set_submit_bookmark(runner, plan, diagnostics).await?;
+        push_submit_bookmark(runner, config, plan, diagnostics).await?;
+        verify_submit_bookmark_pushed(runner, config, plan).await?;
         if let Some(progress) = &progress {
             progress.set_position((index + 1) as u64);
         }
@@ -1486,12 +1506,12 @@ pub(crate) fn push_changed_heads(
     Ok(())
 }
 
-pub(crate) fn verify_submit_bookmark_pushed(
+pub(crate) async fn verify_submit_bookmark_pushed(
     runner: &impl CommandRunner,
     config: &AppConfig,
     plan: &SubmitPlan,
 ) -> Result<()> {
-    let remote_head = remote_head_oid(runner, &config.remote, &plan.head_branch)?;
+    let remote_head = remote_head_oid(runner, &config.remote, &plan.head_branch).await?;
     if remote_head.as_deref() != Some(plan.change.commit_id.as_str()) {
         bail!(
             "phase=push-refs object=bookmark:{} error=push completed but remote branch is {}; expected {}. safe-next-command=`forklift submit --dry-run`",
@@ -1507,7 +1527,7 @@ pub(crate) fn verify_submit_bookmark_pushed(
     Ok(())
 }
 
-pub(crate) fn set_submit_bookmark(
+pub(crate) async fn set_submit_bookmark(
     runner: &impl CommandRunner,
     plan: &SubmitPlan,
     diagnostics: Diagnostics,
@@ -1525,7 +1545,7 @@ pub(crate) fn set_submit_bookmark(
         plan.change.commit_id.as_str(),
     ];
     diagnostics.command("jj", &args);
-    let output = runner.run("jj", &args)?;
+    let output = runner.run("jj", &args).await?;
     if !output.success {
         bail!(
             "phase=push-refs object=bookmark:{} failed-command=`{}` error={} safe-next-command=`forklift submit --dry-run`",
@@ -1538,7 +1558,7 @@ pub(crate) fn set_submit_bookmark(
     Ok(())
 }
 
-pub(crate) fn push_submit_bookmark(
+pub(crate) async fn push_submit_bookmark(
     runner: &impl CommandRunner,
     config: &AppConfig,
     plan: &SubmitPlan,
@@ -1554,7 +1574,7 @@ pub(crate) fn push_submit_bookmark(
         plan.head_branch.as_str(),
     ];
     diagnostics.command("jj", &args);
-    let output = runner.run("jj", &args)?;
+    let output = runner.run("jj", &args).await?;
     if !output.success {
         bail!(
             "phase=push-refs object=bookmark:{} failed-command=`{}` error={} safe-next-command=`forklift submit --dry-run`",

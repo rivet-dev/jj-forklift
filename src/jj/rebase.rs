@@ -35,7 +35,7 @@ pub(crate) fn sync_rebase_destination(
         .unwrap_or_else(|| RebaseDestination::Trunk(config.trunk.clone()))
 }
 
-pub(crate) fn rebase_stack_roots(
+pub(crate) async fn rebase_stack_roots(
     runner: &impl CommandRunner,
     stack: &[ResolvedChange],
     destination: RebaseDestination,
@@ -64,7 +64,7 @@ pub(crate) fn rebase_stack_roots(
     }
 
     diagnostics.command("jj", &args);
-    let output = runner.run("jj", &args)?;
+    let output = runner.run("jj", &args).await?;
     if !output.success {
         bail!(
             "failed-command=`{}` error={}",
@@ -76,7 +76,7 @@ pub(crate) fn rebase_stack_roots(
     Ok(1)
 }
 
-pub(crate) fn rebase_selected_stack(
+pub(crate) async fn rebase_selected_stack(
     runner: &impl CommandRunner,
     revset: &str,
     stack: &[ResolvedChange],
@@ -100,7 +100,7 @@ pub(crate) fn rebase_selected_stack(
     }
 
     diagnostics.command("jj", &args);
-    let output = runner.run("jj", &args)?;
+    let output = runner.run("jj", &args).await?;
     if !output.success {
         bail!(
             "failed-command=`{}` error={}",
@@ -125,8 +125,9 @@ pub(crate) fn stack_root(stack: &[ResolvedChange]) -> Result<&ResolvedChange> {
 }
 
 #[tracing::instrument(level = "trace", skip_all, fields(rev = %rev))]
-pub(crate) fn git_rev_parse(runner: &impl CommandRunner, rev: &str) -> Result<String> {
+pub(crate) async fn git_rev_parse(runner: &impl CommandRunner, rev: &str) -> Result<String> {
     git_run_required(runner, &["rev-parse", rev])
+        .await
         .with_context(|| format!("resolve commit id for `{rev}`"))
 }
 

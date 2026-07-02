@@ -1,7 +1,7 @@
 use super::super::cli::*;
 use super::super::*;
 
-pub(crate) fn run(
+pub(crate) async fn run(
     runner: &impl CommandRunner,
     config: &AppConfig,
     options: SubmitOptions,
@@ -11,9 +11,11 @@ pub(crate) fn run(
 ) -> Result<()> {
     diagnostics.phase("submit-fetch");
     fetch_remote_preserving_local_commits(runner, config, diagnostics)
+        .await
         .map_err(|error| phase_error("submit-fetch", &config.remote, error))?;
 
     let mut context = resolve_stack_context(runner, DEFAULT_STACK_REVSET)
+        .await
         .map_err(|error| phase_error("resolve-stack", DEFAULT_STACK_REVSET, error))?;
 
     // The pre-submit fetch fast-forwards the local trunk bookmark whenever
@@ -22,6 +24,7 @@ pub(crate) fn run(
     // `forklift sync`, offer to perform sync's trunk-move + rebase here
     // (confirmed interactively unless `--yes`) and carry on.
     if stack_behind_trunk(runner, config, &context)
+        .await
         .map_err(|error| phase_error("validate-submit-bases", "stack", error))?
     {
         // A dry run only plans the rebase, so there is nothing to confirm.
@@ -30,6 +33,7 @@ pub(crate) fn run(
         }
         diagnostics.phase("move-trunk");
         move_trunk_to_remote(runner, config, diagnostics)
+            .await
             .map_err(|error| phase_error("move-trunk", &config.trunk, error))?;
         diagnostics.phase("rebase-stack");
         rebase_stack_roots(
@@ -38,6 +42,7 @@ pub(crate) fn run(
             RebaseDestination::Trunk(config.trunk.clone()),
             diagnostics,
         )
+        .await
         .map_err(|error| phase_error("rebase-stack", DEFAULT_STACK_REVSET, error))?;
         if dry_run {
             // The rebase was only planned, so the live commits still fail base
@@ -50,6 +55,7 @@ pub(crate) fn run(
             return Ok(());
         }
         let conflicts = report_sync_conflicts(runner, DEFAULT_STACK_REVSET)
+            .await
             .map_err(|error| phase_error("rebase-stack", DEFAULT_STACK_REVSET, error))?;
         if conflicts > 0 {
             return Err(phase_error(
@@ -65,6 +71,7 @@ pub(crate) fn run(
             ));
         }
         context = resolve_stack_context(runner, DEFAULT_STACK_REVSET)
+            .await
             .map_err(|error| phase_error("resolve-stack", DEFAULT_STACK_REVSET, error))?;
     }
 
@@ -79,7 +86,8 @@ pub(crate) fn run(
         options.yes,
         "forklift submit --yes",
         diagnostics,
-    )?;
+    )
+    .await?;
     if verbose {
         eprintln!(
             "submit: {} pushed, {} created, {} updated, {} unchanged, {} comments created, {} comments updated, {} comments unchanged",

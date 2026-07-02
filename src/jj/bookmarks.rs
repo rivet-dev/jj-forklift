@@ -1,7 +1,7 @@
 use super::super::*;
 use super::*;
 
-pub(crate) fn update_get_frozen_bookmarks(
+pub(crate) async fn update_get_frozen_bookmarks(
     runner: &impl CommandRunner,
     prs: &[GhPr],
     diagnostics: Diagnostics,
@@ -17,14 +17,15 @@ pub(crate) fn update_get_frozen_bookmarks(
         return Ok(());
     }
 
-    let existing = frozen_bookmarks(runner)?
+    let existing = frozen_bookmarks(runner)
+        .await?
         .into_iter()
         .map(|bookmark| (bookmark.pr_number, bookmark))
         .collect::<BTreeMap<_, _>>();
     for pr in prs {
         if let Some(bookmark) = existing.get(&pr.number)
             && bookmark.commit_id != pr.head_ref_oid
-            && !git_commit_is_ancestor(runner, &bookmark.commit_id, &pr.head_ref_oid)?
+            && !git_commit_is_ancestor(runner, &bookmark.commit_id, &pr.head_ref_oid).await?
         {
             bail!(
                 CliError::new(format!(
@@ -51,7 +52,7 @@ pub(crate) fn update_get_frozen_bookmarks(
             pr.head_ref_oid.as_str(),
         ];
         diagnostics.command("jj", &args);
-        let output = runner.run("jj", &args)?;
+        let output = runner.run("jj", &args).await?;
         if !output.success {
             bail!(
                 "failed-command=`{}` error={}",
@@ -70,13 +71,13 @@ pub(crate) fn frozen_bookmark_name(pr_number: u64) -> String {
 }
 
 #[tracing::instrument(level = "trace", skip_all)]
-pub(crate) fn git_commit_is_ancestor(
+pub(crate) async fn git_commit_is_ancestor(
     runner: &impl CommandRunner,
     ancestor: &str,
     descendant: &str,
 ) -> Result<bool> {
     let args = ["merge-base", "--is-ancestor", ancestor, descendant];
-    let output = git_run(runner, &args)?;
+    let output = git_run(runner, &args).await?;
     Ok(output.success)
 }
 
@@ -93,7 +94,7 @@ pub(crate) struct FrozenBookmark {
     pub(crate) commit_id: String,
 }
 
-pub(crate) fn frozen_bookmarks(runner: &impl CommandRunner) -> Result<Vec<FrozenBookmark>> {
+pub(crate) async fn frozen_bookmarks(runner: &impl CommandRunner) -> Result<Vec<FrozenBookmark>> {
     let args = [
         "bookmark",
         "list",
@@ -101,7 +102,7 @@ pub(crate) fn frozen_bookmarks(runner: &impl CommandRunner) -> Result<Vec<Frozen
         "-T",
         FROZEN_BOOKMARK_TEMPLATE,
     ];
-    let output = runner.run("jj", &args)?;
+    let output = runner.run("jj", &args).await?;
     if !output.success {
         bail!(
             "failed-command=`{}` error={}",
@@ -143,7 +144,7 @@ pub(crate) fn frozen_bookmarks(runner: &impl CommandRunner) -> Result<Vec<Frozen
     Ok(bookmarks)
 }
 
-pub(crate) fn resolve_stack_resolution(
+pub(crate) async fn resolve_stack_resolution(
     runner: &impl CommandRunner,
     owned: Vec<ResolvedChange>,
     frozen_bookmarks: Vec<FrozenBookmark>,
@@ -151,18 +152,18 @@ pub(crate) fn resolve_stack_resolution(
     let frozen_dependencies = if frozen_bookmarks.is_empty() {
         Vec::new()
     } else {
-        let frozen_changes = resolve_frozen_changes(runner, frozen_bookmarks)?;
-        frozen_dependencies_below_owned(runner, &owned, frozen_changes)?
+        let frozen_changes = resolve_frozen_changes(runner, frozen_bookmarks).await?;
+        frozen_dependencies_below_owned(runner, &owned, frozen_changes).await?
     };
     let resolution = StackResolution {
         owned,
         frozen_dependencies,
     };
-    validate_owned_base(runner, &resolution)?;
+    validate_owned_base(runner, &resolution).await?;
     Ok(resolution)
 }
 
-pub(crate) fn resolve_purely_frozen_stack(
+pub(crate) async fn resolve_purely_frozen_stack(
     runner: &impl CommandRunner,
     frozen_bookmarks: Vec<FrozenBookmark>,
 ) -> Result<StackResolution> {
@@ -173,10 +174,10 @@ pub(crate) fn resolve_purely_frozen_stack(
         );
     }
     let at_commit =
-        resolve_single_rev(runner, "@").context("resolve current revision for frozen sync")?;
-    let frozen_changes = resolve_frozen_changes(runner, frozen_bookmarks)?;
+        resolve_single_rev(runner, "@").await.context("resolve current revision for frozen sync")?;
+    let frozen_changes = resolve_frozen_changes(runner, frozen_bookmarks).await?;
     if let Some(frozen_dependencies) =
-        frozen_dependency_chain_ending_at(runner, &frozen_changes, &at_commit)?
+        frozen_dependency_chain_ending_at(runner, &frozen_changes, &at_commit).await?
     {
         return Ok(StackResolution {
             owned: Vec::new(),
@@ -184,12 +185,12 @@ pub(crate) fn resolve_purely_frozen_stack(
         });
     }
 
-    let current = resolve_stack(runner, "@").context("resolve current revision for frozen sync")?;
+    let current = resolve_stack(runner, "@").await.context("resolve current revision for frozen sync")?;
     if let [current] = current.as_slice() {
         if current.empty {
             if let [parent] = current.parent_ids.as_slice() {
                 if let Some(frozen_dependencies) =
-                    frozen_dependency_chain_ending_at(runner, &frozen_changes, parent)?
+                    frozen_dependency_chain_ending_at(runner, &frozen_changes, parent).await?
                 {
                     return Ok(StackResolution {
                         owned: Vec::new(),
@@ -207,13 +208,14 @@ pub(crate) fn resolve_purely_frozen_stack(
     .resolution("run `forklift get <pr>` first, or move to a mutable stack"));
 }
 
-pub(crate) fn resolve_frozen_changes(
+pub(crate) async fn resolve_frozen_changes(
     runner: &impl CommandRunner,
     bookmarks: Vec<FrozenBookmark>,
 ) -> Result<Vec<FrozenDependency>> {
     let mut dependencies = Vec::new();
     for bookmark in bookmarks {
         let changes = resolve_stack(runner, &bookmark.commit_id)
+            .await
             .with_context(|| format!("resolve frozen bookmark `{}`", bookmark.name))?;
         let [change] = changes.as_slice() else {
             bail!(CliError::new(format!(
@@ -247,7 +249,7 @@ pub(crate) fn resolve_frozen_changes(
 }
 
 #[tracing::instrument(skip_all, fields(top_commit = %top_commit))]
-pub(crate) fn frozen_dependency_chain_ending_at(
+pub(crate) async fn frozen_dependency_chain_ending_at(
     runner: &impl CommandRunner,
     frozen: &[FrozenDependency],
     top_commit: &str,
@@ -274,7 +276,7 @@ pub(crate) fn frozen_dependency_chain_ending_at(
         // The next dependency below is the nearest *frozen ancestor*, not the
         // immediate parent: a multi-commit PR puts its own intra-PR commits
         // between its frozen head and the next PR's head.
-        let frozen_parents = nearest_frozen_ancestors(runner, &commit_ids, &current.change.commit_id)?;
+        let frozen_parents = nearest_frozen_ancestors(runner, &commit_ids, &current.change.commit_id).await?;
         match frozen_parents.as_slice() {
             [] => break,
             [parent] => {
@@ -328,7 +330,7 @@ fn frozen_by_commit(frozen: &[FrozenDependency]) -> Result<HashMap<&str, &Frozen
 /// linear chain); none means `head` is the bottom of the frozen stack. Walking
 /// by ancestry — rather than the immediate parent — bridges the intra-PR commits
 /// of a multi-commit frozen PR.
-fn nearest_frozen_ancestors(
+async fn nearest_frozen_ancestors(
     runner: &impl CommandRunner,
     frozen_commit_ids: &[&str],
     head: &str,
@@ -340,7 +342,7 @@ fn nearest_frozen_ancestors(
         .join(" | ");
     let revset = format!("heads(({set}) & ::{head} & ~{head})");
     let args = ["log", "--no-graph", "-r", &revset, "-T", "commit_id ++ \"\\n\""];
-    let output = runner.run("jj", &args)?;
+    let output = runner.run("jj", &args).await?;
     if !output.success {
         bail!(
             "failed-command=`{}` error={}",
@@ -357,7 +359,7 @@ fn nearest_frozen_ancestors(
         .collect())
 }
 
-pub(crate) fn frozen_dependencies_below_owned(
+pub(crate) async fn frozen_dependencies_below_owned(
     runner: &impl CommandRunner,
     owned: &[ResolvedChange],
     frozen: Vec<FrozenDependency>,
@@ -397,7 +399,7 @@ pub(crate) fn frozen_dependencies_below_owned(
         .iter()
         .map(|dependency| dependency.change.commit_id.as_str())
         .collect::<Vec<_>>();
-    let nearest = nearest_frozen_ancestors(runner, &commit_ids, &root.commit_id)?;
+    let nearest = nearest_frozen_ancestors(runner, &commit_ids, &root.commit_id).await?;
     let boundary = match nearest.as_slice() {
         [] => return Ok(Vec::new()),
         [boundary] => boundary.clone(),
@@ -427,7 +429,7 @@ pub(crate) fn frozen_dependencies_below_owned(
         }
     };
 
-    frozen_dependency_chain_ending_at(runner, &frozen, &boundary)?.with_context(|| {
+    frozen_dependency_chain_ending_at(runner, &frozen, &boundary).await?.with_context(|| {
         format!(
             "frozen boundary {} resolved no dependency chain",
             short_commit_id(&boundary)
@@ -436,7 +438,7 @@ pub(crate) fn frozen_dependencies_below_owned(
 }
 
 #[tracing::instrument(skip_all, fields(branch = %branch))]
-pub(crate) fn track_remote_bookmark(
+pub(crate) async fn track_remote_bookmark(
     runner: &impl CommandRunner,
     config: &AppConfig,
     branch: &str,
@@ -454,7 +456,7 @@ pub(crate) fn track_remote_bookmark(
         return Ok(());
     }
     diagnostics.command("jj", &args);
-    let output = runner.run("jj", &args)?;
+    let output = runner.run("jj", &args).await?;
     if !output.success {
         bail!(
             "failed-command=`{}` error={}",
@@ -466,7 +468,7 @@ pub(crate) fn track_remote_bookmark(
 }
 
 #[tracing::instrument(skip_all, fields(bookmark = %bookmark))]
-pub(crate) fn delete_bookmark(
+pub(crate) async fn delete_bookmark(
     runner: &impl CommandRunner,
     bookmark: &str,
     diagnostics: Diagnostics,
@@ -477,7 +479,7 @@ pub(crate) fn delete_bookmark(
         return Ok(());
     }
     diagnostics.command("jj", &args);
-    let output = runner.run("jj", &args)?;
+    let output = runner.run("jj", &args).await?;
     if !output.success {
         bail!(
             "failed-command=`{}` error={}",
@@ -497,7 +499,7 @@ pub(crate) struct RemoteBookmark {
     pub(crate) commit_id: String,
 }
 
-pub(crate) fn remote_bookmarks(runner: &impl CommandRunner) -> Result<Vec<RemoteBookmark>> {
+pub(crate) async fn remote_bookmarks(runner: &impl CommandRunner) -> Result<Vec<RemoteBookmark>> {
     let args = [
         "bookmark",
         "list",
@@ -505,7 +507,7 @@ pub(crate) fn remote_bookmarks(runner: &impl CommandRunner) -> Result<Vec<Remote
         "-T",
         REMOTE_BOOKMARK_TEMPLATE,
     ];
-    let output = runner.run("jj", &args)?;
+    let output = runner.run("jj", &args).await?;
     if !output.success {
         bail!(
             "failed-command=`{}` error={}",
@@ -536,14 +538,14 @@ pub(crate) fn remote_bookmarks(runner: &impl CommandRunner) -> Result<Vec<Remote
 }
 
 #[tracing::instrument(skip_all, fields(rev = %rev))]
-pub(crate) fn untracked_remote_bookmark_blockers(
+pub(crate) async fn untracked_remote_bookmark_blockers(
     runner: &impl CommandRunner,
     config: &AppConfig,
     rev: &str,
     already_tracked_branch: &str,
 ) -> Result<Vec<RemoteBookmark>> {
     let mut blockers = Vec::new();
-    for bookmark in remote_bookmarks(runner)? {
+    for bookmark in remote_bookmarks(runner).await? {
         if bookmark.remote != config.remote
             || bookmark.tracked
             || bookmark.conflicted
@@ -552,7 +554,7 @@ pub(crate) fn untracked_remote_bookmark_blockers(
         {
             continue;
         }
-        if git_commit_is_ancestor(runner, rev, &bookmark.commit_id)? {
+        if git_commit_is_ancestor(runner, rev, &bookmark.commit_id).await? {
             blockers.push(bookmark);
         }
     }
@@ -561,14 +563,14 @@ pub(crate) fn untracked_remote_bookmark_blockers(
 }
 
 #[tracing::instrument(skip_all, fields(rev = %rev))]
-pub(crate) fn track_untracked_remote_bookmark_blockers(
+pub(crate) async fn track_untracked_remote_bookmark_blockers(
     runner: &impl CommandRunner,
     config: &AppConfig,
     rev: &str,
     already_tracked_branch: &str,
     diagnostics: Diagnostics,
 ) -> Result<()> {
-    let blockers = untracked_remote_bookmark_blockers(runner, config, rev, already_tracked_branch)?;
+    let blockers = untracked_remote_bookmark_blockers(runner, config, rev, already_tracked_branch).await?;
     if blockers.is_empty() {
         return Ok(());
     }
@@ -579,7 +581,7 @@ pub(crate) fn track_untracked_remote_bookmark_blockers(
             blocker.name,
             blocker.remote
         );
-        track_remote_bookmark(runner, config, &blocker.name, diagnostics)?;
+        track_remote_bookmark(runner, config, &blocker.name, diagnostics).await?;
     }
 
     Ok(())
@@ -587,27 +589,29 @@ pub(crate) fn track_untracked_remote_bookmark_blockers(
 
 #[tracing::instrument(skip_all, fields(rev = %rev))]
 #[tracing::instrument(level = "trace", skip_all, fields(rev = %rev))]
-pub(crate) fn jj_ref_commit_id(runner: &impl CommandRunner, rev: &str) -> Result<String> {
+pub(crate) async fn jj_ref_commit_id(runner: &impl CommandRunner, rev: &str) -> Result<String> {
     run_required(
         runner,
         "jj",
         &["log", "--no-graph", "-r", rev, "-T", "commit_id"],
     )
+    .await
     .with_context(|| format!("resolve jj revision `{rev}`"))
 }
 
 #[tracing::instrument(level = "trace", skip_all, fields(rev = %rev))]
-pub(crate) fn jj_ref_change_id(runner: &impl CommandRunner, rev: &str) -> Result<String> {
+pub(crate) async fn jj_ref_change_id(runner: &impl CommandRunner, rev: &str) -> Result<String> {
     run_required(
         runner,
         "jj",
         &["log", "--no-graph", "-r", rev, "-T", "change_id"],
     )
+    .await
     .with_context(|| format!("resolve change id for jj revision `{rev}`"))
 }
 
 #[tracing::instrument(skip_all, fields(branch = %branch))]
-pub(crate) fn remote_bookmark_status(
+pub(crate) async fn remote_bookmark_status(
     runner: &impl CommandRunner,
     config: &AppConfig,
     branch: &str,
@@ -620,7 +624,7 @@ pub(crate) fn remote_bookmark_status(
         "-T",
         BOOKMARK_STATUS_TEMPLATE,
     ];
-    let output = runner.run("jj", &args)?;
+    let output = runner.run("jj", &args).await?;
     if !output.success {
         bail!(
             "failed-command=`{}` error={}",
@@ -650,7 +654,7 @@ pub(crate) fn remote_bookmark_status(
     })
 }
 
-pub(crate) fn forget_bookmark_tracking(
+pub(crate) async fn forget_bookmark_tracking(
     runner: &impl CommandRunner,
     branch: &str,
     diagnostics: Diagnostics,
@@ -660,12 +664,12 @@ pub(crate) fn forget_bookmark_tracking(
     }
     let args = ["bookmark", "forget", "--include-remotes", branch];
     diagnostics.command("jj", &args);
-    let _ = runner.run("jj", &args);
+    let _ = runner.run("jj", &args).await;
 }
 
 /// Push the deletion of one or more bookmarks to the remote in a single
 /// `jj git push` invocation.
-pub(crate) fn push_bookmark_deletions(
+pub(crate) async fn push_bookmark_deletions(
     runner: &impl CommandRunner,
     config: &AppConfig,
     branches: &[&str],
@@ -677,7 +681,7 @@ pub(crate) fn push_bookmark_deletions(
         args.push(branch);
     }
     diagnostics.command("jj", &args);
-    let output = runner.run("jj", &args)?;
+    let output = runner.run("jj", &args).await?;
     if !output.success {
         bail!(
             "failed-command=`{}` error={}",
@@ -693,12 +697,12 @@ pub(crate) fn push_bookmark_deletions(
 /// this returns exactly those so cleanup can prune the ones whose change has
 /// already landed (a common residue of a squash/abandon collapsing several
 /// bookmarks onto one surviving commit).
-pub(crate) fn conflicted_local_stack_bookmarks(
+pub(crate) async fn conflicted_local_stack_bookmarks(
     runner: &impl CommandRunner,
     config: &AppConfig,
 ) -> Result<Vec<String>> {
     let args = ["bookmark", "list", "-T", LOCAL_BOOKMARK_TEMPLATE];
-    let output = runner.run("jj", &args)?;
+    let output = runner.run("jj", &args).await?;
     if !output.success {
         bail!(
             "failed-command=`{}` error={}",
@@ -728,9 +732,9 @@ pub(crate) fn conflicted_local_stack_bookmarks(
 }
 
 /// List every resolvable local bookmark name, regardless of prefix or target.
-pub(crate) fn local_bookmark_names(runner: &impl CommandRunner) -> Result<Vec<String>> {
+pub(crate) async fn local_bookmark_names(runner: &impl CommandRunner) -> Result<Vec<String>> {
     let args = ["bookmark", "list", "-T", LOCAL_BOOKMARK_TEMPLATE];
-    let output = runner.run("jj", &args)?;
+    let output = runner.run("jj", &args).await?;
     if !output.success {
         bail!(
             "failed-command=`{}` error={}",
@@ -764,12 +768,12 @@ pub(crate) fn local_bookmark_names(runner: &impl CommandRunner) -> Result<Vec<St
 
 /// List local stack bookmarks (those under the configured branch prefix that
 /// have no remote-only counterpart), regardless of which revision they point at.
-pub(crate) fn local_stack_bookmarks(
+pub(crate) async fn local_stack_bookmarks(
     runner: &impl CommandRunner,
     config: &AppConfig,
 ) -> Result<Vec<String>> {
     let args = ["bookmark", "list", "-T", LOCAL_BOOKMARK_TEMPLATE];
-    let output = runner.run("jj", &args)?;
+    let output = runner.run("jj", &args).await?;
     if !output.success {
         bail!(
             "failed-command=`{}` error={}",

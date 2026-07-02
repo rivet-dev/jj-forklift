@@ -1,7 +1,7 @@
 use super::super::cli::*;
 use super::super::*;
 
-pub(crate) fn run(
+pub(crate) async fn run(
     runner: &impl CommandRunner,
     config: &AppConfig,
     options: RepairOptions,
@@ -10,7 +10,7 @@ pub(crate) fn run(
     dry_run: bool,
 ) -> Result<()> {
     let summary =
-        repair_stack_comments(runner, &config, &options.target, options.yes, diagnostics)?;
+        repair_stack_comments(runner, &config, &options.target, options.yes, diagnostics).await?;
     if dry_run {
         ui_progress(
             "Finished",
