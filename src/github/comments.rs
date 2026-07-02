@@ -2,13 +2,14 @@ use super::super::*;
 use super::*;
 
 #[tracing::instrument(skip_all, fields(pr = pr_number, change = %change_id))]
-pub(crate) fn latest_stack_comment(
+pub(crate) async fn latest_stack_comment(
     runner: &impl CommandRunner,
     github: &GitHubContext,
     pr_number: u64,
     change_id: &str,
 ) -> Result<Option<GhStackComment>> {
-    let mut comments = list_stack_comments(runner, github, pr_number, change_id)?
+    let mut comments = list_stack_comments(runner, github, pr_number, change_id)
+        .await?
         .into_iter()
         .filter(|comment| comment.body.contains(STACK_COMMENT_MARKER))
         .collect::<Vec<_>>();
@@ -63,7 +64,7 @@ pub(crate) struct GhCommentId {
 }
 
 #[tracing::instrument(skip_all, fields(pr = pr_number, change = %change_id))]
-pub(crate) fn upsert_stack_comment(
+pub(crate) async fn upsert_stack_comment(
     runner: &impl CommandRunner,
     github: &GitHubContext,
     pr_number: u64,
@@ -71,7 +72,8 @@ pub(crate) fn upsert_stack_comment(
     body: &str,
     diagnostics: Diagnostics,
 ) -> Result<StackCommentAction> {
-    let mut matches = list_stack_comments(runner, github, pr_number, change_id)?
+    let mut matches = list_stack_comments(runner, github, pr_number, change_id)
+        .await?
         .into_iter()
         .filter(|comment| {
             comment.user_login == github.username && comment.body.contains(STACK_COMMENT_MARKER)
@@ -80,6 +82,7 @@ pub(crate) fn upsert_stack_comment(
 
     if matches.is_empty() {
         return create_stack_comment(runner, github, pr_number, change_id, body, diagnostics)
+            .await
             .map(StackCommentAction::Created);
     }
 
@@ -115,11 +118,12 @@ pub(crate) fn upsert_stack_comment(
         body,
         diagnostics,
     )
+    .await
     .map(|comment_id| StackCommentAction::Updated(comment_id, duplicate_count))
 }
 
 #[tracing::instrument(skip_all, fields(pr = pr_number, change = %change_id))]
-pub(crate) fn list_stack_comments(
+pub(crate) async fn list_stack_comments(
     runner: &impl CommandRunner,
     github: &GitHubContext,
     pr_number: u64,
@@ -133,7 +137,7 @@ pub(crate) fn list_stack_comments(
         "--jq",
         STACK_COMMENT_JQ,
     ];
-    let output = gh_run(runner, &args)?;
+    let output = gh_run(runner, &args).await?;
     if !output.success {
         bail!(
             "phase=stack-comments object=PR #{} change:{} failed-api=`{}` error={} safe-next-command=`forklift submit --dry-run`",
@@ -159,13 +163,14 @@ pub(crate) fn list_stack_comments(
 /// rebuilt cache complete instead of relying solely on the scan to avoid a
 /// duplicate comment.
 #[tracing::instrument(skip_all, fields(pr = pr_number, change = %change_id))]
-pub(crate) fn find_stack_comment_id(
+pub(crate) async fn find_stack_comment_id(
     runner: &impl CommandRunner,
     github: &GitHubContext,
     pr_number: u64,
     change_id: &str,
 ) -> Option<String> {
     let mut matches = list_stack_comments(runner, github, pr_number, change_id)
+        .await
         .ok()?
         .into_iter()
         .filter(|comment| {
@@ -200,7 +205,7 @@ pub(crate) fn parse_stack_comment_line(
 }
 
 #[tracing::instrument(skip_all, fields(pr = pr_number, change = %change_id))]
-pub(crate) fn create_stack_comment(
+pub(crate) async fn create_stack_comment(
     runner: &impl CommandRunner,
     github: &GitHubContext,
     pr_number: u64,
@@ -221,11 +226,11 @@ pub(crate) fn create_stack_comment(
         "{id}",
     ];
 
-    run_comment_mutation(runner, &args, "create", pr_number, change_id, diagnostics)
+    run_comment_mutation(runner, &args, "create", pr_number, change_id, diagnostics).await
 }
 
 #[tracing::instrument(skip_all, fields(comment = comment_id, pr = pr_number, change = %change_id))]
-pub(crate) fn update_stack_comment(
+pub(crate) async fn update_stack_comment(
     runner: &impl CommandRunner,
     github: &GitHubContext,
     comment_id: u64,
@@ -247,11 +252,11 @@ pub(crate) fn update_stack_comment(
         "{id}",
     ];
 
-    run_comment_mutation(runner, &args, "update", pr_number, change_id, diagnostics)
+    run_comment_mutation(runner, &args, "update", pr_number, change_id, diagnostics).await
 }
 
 #[tracing::instrument(skip_all, fields(action = %action, pr = pr_number, change = %change_id))]
-pub(crate) fn run_comment_mutation(
+pub(crate) async fn run_comment_mutation(
     runner: &impl CommandRunner,
     args: &[&str],
     action: &str,
@@ -260,7 +265,7 @@ pub(crate) fn run_comment_mutation(
     diagnostics: Diagnostics,
 ) -> Result<String> {
     diagnostics.command("gh", args);
-    let output = gh_run(runner, args)?;
+    let output = gh_run(runner, args).await?;
     if !output.success {
         bail!(
             "phase=stack-comments object=PR #{} change:{} failed-api=`{}` error={} safe-next-command=`forklift submit --dry-run`",

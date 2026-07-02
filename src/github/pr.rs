@@ -157,13 +157,13 @@ pub(crate) fn get_pr_repo<'a>(pr: &'a GhPr, role: &str) -> Result<&'a GhReposito
     }
 }
 
-pub(crate) fn resolve_get_pr_changes(
+pub(crate) async fn resolve_get_pr_changes(
     runner: &impl CommandRunner,
     prs: &[GhPr],
 ) -> Result<BTreeMap<u64, ResolvedChange>> {
     let mut changes = BTreeMap::new();
     for pr in prs {
-        let stack = resolve_stack(runner, &pr.head_ref_oid).with_context(|| {
+        let stack = resolve_stack(runner, &pr.head_ref_oid).await.with_context(|| {
             format!("resolve fetched PR #{} head {}", pr.number, pr.head_ref_oid)
         })?;
         let [change] = stack.as_slice() else {
@@ -260,19 +260,19 @@ pub(crate) fn normalize_get_branch_target(target: &str) -> String {
         .to_owned()
 }
 
-pub(crate) fn resolve_get_target_pr(
+pub(crate) async fn resolve_get_target_pr(
     runner: &impl CommandRunner,
     github: &GitHubContext,
     target: GetTarget,
 ) -> Result<GhPr> {
-    resolve_target_pr(runner, github, target, "get")
+    resolve_target_pr(runner, github, target, "get").await
 }
 
 /// Resolve a `pr` command target into `(pr_number, browser_url)`.
 ///
 /// A bare PR number or PR URL needs no network round-trip; branch/change-id
 /// targets (and the default current-change lookup) are resolved through `gh`.
-pub(crate) fn resolve_pr_url(
+pub(crate) async fn resolve_pr_url(
     runner: &impl CommandRunner,
     config: &AppConfig,
     github: &GitHubContext,
@@ -282,14 +282,14 @@ pub(crate) fn resolve_pr_url(
         Some(target) => match parse_get_target(target, &github.repo)? {
             GetTarget::PullRequest { repo, number } => Ok((number, github_pr_url(&repo, number))),
             branch @ GetTarget::BranchOrChange { .. } => {
-                let pr = resolve_target_pr(runner, github, branch, "pr")?;
+                let pr = resolve_target_pr(runner, github, branch, "pr").await?;
                 Ok((pr.number, github_pr_url(&github.repo, pr.number)))
             }
         },
         None => {
-            ensure_default_pr_target_is_stack_change(runner, config)?;
-            let change_id = current_change_id(runner)?;
-            let pr = lookup_get_target_pr(runner, github, &change_id, "pr").map_err(|_| {
+            ensure_default_pr_target_is_stack_change(runner, config).await?;
+            let change_id = current_change_id(runner).await?;
+            let pr = lookup_get_target_pr(runner, github, &change_id, "pr").await.map_err(|_| {
                 CliError::new("current revision is not submitted")
                     .reason(format!(
                         "current change `{}` has no open PR yet",
@@ -302,11 +302,11 @@ pub(crate) fn resolve_pr_url(
     }
 }
 
-pub(crate) fn ensure_default_pr_target_is_stack_change(
+pub(crate) async fn ensure_default_pr_target_is_stack_change(
     runner: &impl CommandRunner,
     config: &AppConfig,
 ) -> Result<()> {
-    let stack = resolve_stack(runner, DEFAULT_STACK_REVSET)?;
+    let stack = resolve_stack(runner, DEFAULT_STACK_REVSET).await?;
     if !stack.is_empty() {
         return Ok(());
     }
@@ -319,7 +319,7 @@ pub(crate) fn ensure_default_pr_target_is_stack_change(
 
 /// Change id of the current working-copy commit (`@`).
 #[tracing::instrument(skip_all, fields(url = %url))]
-pub(crate) fn open_url(runner: &impl CommandRunner, url: &str) -> Result<()> {
+pub(crate) async fn open_url(runner: &impl CommandRunner, url: &str) -> Result<()> {
     let (program, args): (&str, Vec<&str>) = if cfg!(target_os = "macos") {
         ("open", vec![url])
     } else if cfg!(target_os = "windows") {
@@ -327,7 +327,7 @@ pub(crate) fn open_url(runner: &impl CommandRunner, url: &str) -> Result<()> {
     } else {
         ("xdg-open", vec![url])
     };
-    let output = runner.run(program, &args)?;
+    let output = runner.run(program, &args).await?;
     if !output.success {
         bail!(
             "failed to open browser: failed-command=`{}` error={}",
@@ -338,7 +338,7 @@ pub(crate) fn open_url(runner: &impl CommandRunner, url: &str) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn resolve_target_pr(
+pub(crate) async fn resolve_target_pr(
     runner: &impl CommandRunner,
     github: &GitHubContext,
     target: GetTarget,
@@ -346,36 +346,37 @@ pub(crate) fn resolve_target_pr(
 ) -> Result<GhPr> {
     match target {
         GetTarget::PullRequest { number, .. } => {
-            fetch_pr_by_number(runner, github, purpose, number)
+            fetch_pr_by_number(runner, github, purpose, number).await
         }
         GetTarget::BranchOrChange { value, .. } => {
-            lookup_get_target_pr(runner, github, &value, purpose)
+            lookup_get_target_pr(runner, github, &value, purpose).await
         }
     }
 }
 
 #[tracing::instrument(skip_all, fields(target = %target))]
-pub(crate) fn lookup_get_target_pr(
+pub(crate) async fn lookup_get_target_pr(
     runner: &impl CommandRunner,
     github: &GitHubContext,
     target: &str,
     purpose: &str,
 ) -> Result<GhPr> {
-    let prs = list_open_prs(runner, github, purpose)?;
+    let prs = list_open_prs(runner, github, purpose).await?;
     let branch_matches = prs
         .iter()
         .filter(|pr| pr.head_ref_name == target)
         .cloned()
         .collect::<Vec<_>>();
     if !branch_matches.is_empty() {
-        return one_get_target_match(runner, github, target, "branch", branch_matches, purpose);
+        return one_get_target_match(runner, github, target, "branch", branch_matches, purpose)
+            .await;
     }
 
     // Prefer jj's own prefix resolution: it expands a short, locally
     // unambiguous change id (e.g. `lt`) to a full id and errors on
     // ambiguity. Fall back to the literal >=8 char branch-prefix match so
     // PRs whose change isn't checked out locally still resolve.
-    let prefix = match expand_local_change_id(runner, target) {
+    let prefix = match expand_local_change_id(runner, target).await {
         Some(change_id) => change_id_branch_prefix(&change_id).to_owned(),
         None => {
             let Some(prefix) = change_prefix_get_target(target) else {
@@ -405,10 +406,11 @@ pub(crate) fn lookup_get_target_pr(
         change_matches,
         purpose,
     )
+    .await
 }
 
 #[tracing::instrument(skip_all, fields(purpose = %purpose))]
-pub(crate) fn list_open_prs(
+pub(crate) async fn list_open_prs(
     runner: &impl CommandRunner,
     github: &GitHubContext,
     purpose: &str,
@@ -425,7 +427,7 @@ pub(crate) fn list_open_prs(
         "--limit",
         "200",
     ];
-    let output = gh_run(runner, &args)?;
+    let output = gh_run(runner, &args).await?;
     if !output.success {
         bail!(
             "`{}` failed while listing open PRs for {}: {}",
@@ -440,7 +442,7 @@ pub(crate) fn list_open_prs(
 }
 
 #[tracing::instrument(level = "trace", skip_all, fields(target = %target, kind = %kind))]
-pub(crate) fn one_get_target_match(
+pub(crate) async fn one_get_target_match(
     runner: &impl CommandRunner,
     github: &GitHubContext,
     target: &str,
@@ -450,7 +452,7 @@ pub(crate) fn one_get_target_match(
 ) -> Result<GhPr> {
     match matches.as_slice() {
         [] => bail!("{purpose} target `{target}` did not match an open PR {kind}"),
-        [pr] => fetch_pr_by_number(runner, github, purpose, pr.number),
+        [pr] => fetch_pr_by_number(runner, github, purpose, pr.number).await,
         _ => {
             let refs = matches
                 .iter()
@@ -469,13 +471,16 @@ pub(crate) fn one_get_target_match(
 /// in the local repo, or is ambiguous (jj resolves to zero or many commits).
 /// In every `None` case the caller falls back to literal branch matching.
 #[tracing::instrument(level = "trace", skip_all, fields(target = %target))]
-pub(crate) fn expand_local_change_id(runner: &impl CommandRunner, target: &str) -> Option<String> {
+pub(crate) async fn expand_local_change_id(
+    runner: &impl CommandRunner,
+    target: &str,
+) -> Option<String> {
     if target.is_empty() || !target.chars().all(|ch| ch.is_ascii_alphanumeric()) {
         return None;
     }
     let template = "change_id ++ \"\\n\"";
     let args = ["log", "--no-graph", "-r", target, "-T", template];
-    let output = runner.run("jj", &args).ok()?;
+    let output = runner.run("jj", &args).await.ok()?;
     if !output.success {
         return None;
     }
@@ -515,7 +520,7 @@ pub(crate) fn head_branch_matches_change_prefix(branch: &str, prefix: &str) -> b
 }
 
 #[tracing::instrument(skip_all, fields(change = %change_id, head_branch = %head_branch))]
-pub(crate) fn lookup_cached_pr(
+pub(crate) async fn lookup_cached_pr(
     runner: &impl CommandRunner,
     github: &GitHubContext,
     change_id: &str,
@@ -532,7 +537,7 @@ pub(crate) fn lookup_cached_pr(
         )));
     }
 
-    let pr = fetch_pr_by_number(runner, github, change_id, entry.pr_number)?;
+    let pr = fetch_pr_by_number(runner, github, change_id, entry.pr_number).await?;
     if !pr.state.eq_ignore_ascii_case("OPEN") {
         bail!(CliError::new(format!(
             "closed cached PR for {}/{}: cache points to {} PR #{} on `{}`",
@@ -658,7 +663,7 @@ pub(crate) fn validate_cached_pr_metadata(
 }
 
 #[tracing::instrument(skip_all, fields(change = %change_id, pr = pr_number))]
-pub(crate) fn fetch_pr_by_number(
+pub(crate) async fn fetch_pr_by_number(
     runner: &impl CommandRunner,
     github: &GitHubContext,
     change_id: &str,
@@ -667,7 +672,7 @@ pub(crate) fn fetch_pr_by_number(
     let pr_number_string = pr_number.to_string();
     let endpoint = format!("repos/{}/pulls/{}", github.repo, pr_number);
     let args = ["api", endpoint.as_str(), "--jq", PR_API_JQ];
-    let output = gh_run(runner, &args)?;
+    let output = gh_run(runner, &args).await?;
     if !output.success {
         bail!(
             CliError::new(format!(
@@ -685,7 +690,7 @@ pub(crate) fn fetch_pr_by_number(
 }
 
 #[tracing::instrument(skip_all, fields(change = %change_id, head_branch = %head_branch))]
-pub(crate) fn lookup_open_pr_by_head_branch(
+pub(crate) async fn lookup_open_pr_by_head_branch(
     runner: &impl CommandRunner,
     github: &GitHubContext,
     change_id: &str,
@@ -703,7 +708,7 @@ pub(crate) fn lookup_open_pr_by_head_branch(
         "--json",
         PR_JSON_FIELDS,
     ];
-    let output = gh_run(runner, &args)?;
+    let output = gh_run(runner, &args).await?;
     if !output.success {
         bail!(
             "`{}` failed while looking up open PR for {}/{}: {}",
@@ -729,8 +734,8 @@ pub(crate) fn lookup_open_pr_by_head_branch(
                     pr.number
                 )));
             }
-            let pr = fetch_pr_by_number(runner, github, change_id, pr.number)?;
-            let comment_id = find_stack_comment_id(runner, github, pr.number, change_id);
+            let pr = fetch_pr_by_number(runner, github, change_id, pr.number).await?;
+            let comment_id = find_stack_comment_id(runner, github, pr.number, change_id).await;
             Ok(Some(pr.into_cache_entry(comment_id)))
         }
         _ => bail!(CliError::new(format!(

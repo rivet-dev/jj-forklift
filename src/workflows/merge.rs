@@ -115,7 +115,7 @@ use super::*;
 ///
 /// `admin` bypasses branch-protection (`BLOCKED`), required-status-check, and
 /// approval gates for operators force-pushing past protection.
-pub(crate) fn diagnose_empty_targeted_merge(
+pub(crate) async fn diagnose_empty_targeted_merge(
     runner: &impl CommandRunner,
     config: &AppConfig,
     target: &MergeTarget,
@@ -123,8 +123,8 @@ pub(crate) fn diagnose_empty_targeted_merge(
     frozen_bookmarks: &[FrozenBookmark],
 ) -> Result<()> {
     let target_label = target.label();
-    let trunk = resolve_single_rev(runner, "trunk()")?;
-    if git_commit_is_ancestor(runner, &target.commit_id, &trunk)? {
+    let trunk = resolve_single_rev(runner, "trunk()").await?;
+    if git_commit_is_ancestor(runner, &target.commit_id, &trunk).await? {
         return Err(CliError::new(format!("{target_label} is already on trunk"))
             .reason(format!("{} is in `{}`", target.commit_id, config.trunk))
             .resolution("choose an unmerged owned PR or run `forklift sync`")
@@ -132,12 +132,12 @@ pub(crate) fn diagnose_empty_targeted_merge(
     }
 
     let target_range_revset = format!("trunk()..{} & ~empty()", target.commit_id);
-    let target_range = resolve_stack(runner, &target_range_revset)?;
+    let target_range = resolve_stack(runner, &target_range_revset).await?;
     let immutable_target_revset = format!("{} & ::(immutable_heads() | root())", target.commit_id);
-    let immutable_target = resolve_stack(runner, &immutable_target_revset)?;
+    let immutable_target = resolve_stack(runner, &immutable_target_revset).await?;
     if !immutable_target.is_empty() {
         let covering_bookmarks =
-            frozen_bookmarks_covering_target(runner, &target.commit_id, frozen_bookmarks)?;
+            frozen_bookmarks_covering_target(runner, &target.commit_id, frozen_bookmarks).await?;
         if !covering_bookmarks.is_empty() {
             let unfreeze_targets = covering_bookmarks
                 .iter()
@@ -195,7 +195,7 @@ pub(crate) fn diagnose_empty_targeted_merge(
     )
 }
 
-pub(crate) fn frozen_bookmarks_covering_target<'a>(
+pub(crate) async fn frozen_bookmarks_covering_target<'a>(
     runner: &impl CommandRunner,
     target_commit: &str,
     frozen_bookmarks: &'a [FrozenBookmark],
@@ -210,16 +210,16 @@ pub(crate) fn frozen_bookmarks_covering_target<'a>(
 
     for bookmark in frozen_bookmarks {
         if bookmark.commit_id != target_commit
-            && git_commit_is_ancestor(runner, target_commit, &bookmark.commit_id)?
+            && git_commit_is_ancestor(runner, target_commit, &bookmark.commit_id).await?
         {
             covering.push(bookmark);
         }
     }
-    sort_frozen_bookmarks_top_down(runner, &mut covering)?;
+    sort_frozen_bookmarks_top_down(runner, &mut covering).await?;
     Ok(covering)
 }
 
-pub(crate) fn sort_frozen_bookmarks_top_down(
+pub(crate) async fn sort_frozen_bookmarks_top_down(
     runner: &impl CommandRunner,
     bookmarks: &mut Vec<&FrozenBookmark>,
 ) -> Result<()> {
@@ -227,16 +227,16 @@ pub(crate) fn sort_frozen_bookmarks_top_down(
     while !bookmarks.is_empty() {
         let mut top_index = None;
         for (index, candidate) in bookmarks.iter().enumerate() {
-            let has_frozen_child = bookmarks
-                .iter()
-                .enumerate()
-                .filter(|(other_index, _)| *other_index != index)
-                .map(|(_, other)| {
-                    git_commit_is_ancestor(runner, &candidate.commit_id, &other.commit_id)
-                })
-                .collect::<Result<Vec<_>>>()?
-                .into_iter()
-                .any(|is_ancestor| is_ancestor);
+            let mut child_flags = Vec::new();
+            for (other_index, other) in bookmarks.iter().enumerate() {
+                if other_index == index {
+                    continue;
+                }
+                child_flags.push(
+                    git_commit_is_ancestor(runner, &candidate.commit_id, &other.commit_id).await?,
+                );
+            }
+            let has_frozen_child = child_flags.into_iter().any(|is_ancestor| is_ancestor);
             if !has_frozen_child {
                 top_index = Some(index);
                 break;
@@ -260,7 +260,7 @@ pub(crate) fn merge_unfreeze_commands(targets: &[String]) -> String {
 }
 
 #[tracing::instrument(skip_all, fields(revset = %revset))]
-pub(crate) fn merge_stack(
+pub(crate) async fn merge_stack(
     runner: &impl CommandRunner,
     config: &AppConfig,
     revset: &str,
@@ -273,23 +273,28 @@ pub(crate) fn merge_stack(
 
     diagnostics.phase("resolve-stack");
     resolve_single_rev(runner, "trunk()")
+        .await
         .map_err(|error| phase_error("resolve-stack", "trunk()", error))?;
     let frozen_bookmarks = frozen_bookmarks(runner)
+        .await
         .map_err(|error| phase_error("resolve-stack", "frozen-bookmarks", error))?;
     let stack = resolve_stack(runner, revset)
+        .await
         .map_err(|error| phase_error("resolve-stack", revset, error))?;
     if stack.is_empty() {
         if let Some(target) = target {
-            diagnose_empty_targeted_merge(runner, config, target, revset, &frozen_bookmarks)?;
+            diagnose_empty_targeted_merge(runner, config, target, revset, &frozen_bookmarks).await?;
         }
         return Ok(summary);
     }
     validate_stack_shape(&stack, revset)
         .map_err(|error| phase_error("resolve-stack", revset, error))?;
     let stack_resolution = resolve_stack_resolution(runner, stack, frozen_bookmarks)
+        .await
         .map_err(|error| phase_error("resolve-stack", "frozen-dependencies", error))?;
 
     let github = GitHubContext::resolve(runner)
+        .await
         .map_err(|error| phase_error("resolve-github", "github", error))?;
     let context = AppContext::new(github, stack_resolution);
     if diagnostics.verbose {
@@ -302,12 +307,12 @@ pub(crate) fn merge_stack(
         .stack
         .first()
         .with_context(|| format!("phase=resolve-stack object={revset} empty stack"))?;
-    let (_, bottom_pr) = match resolve_merge_pr(runner, config, &context, bottom, diagnostics) {
+    let (_, bottom_pr) = match resolve_merge_pr(runner, config, &context, bottom, diagnostics).await {
         Ok(resolved) => resolved,
         Err(error) if error.downcast_ref::<MergeSubmitRequired>().is_some() => return Err(error),
         Err(error) => return Err(phase_error("merge-pr-lookup", &bottom.change_id, error)),
     };
-    validate_merge_frozen_dependencies(runner, config, &context, &bottom_pr).map_err(|error| {
+    validate_merge_frozen_dependencies(runner, config, &context, &bottom_pr).await.map_err(|error| {
         phase_error(
             "merge-frozen-check",
             format!("PR #{}", bottom_pr.number),
@@ -330,6 +335,7 @@ pub(crate) fn merge_stack(
     let checking_progress = diagnostics.progress_bar("Checking", "PRs", context.stack.len());
     for (index, change) in context.stack.iter().enumerate() {
         let (entry, mut pr) = match resolve_merge_pr(runner, config, &context, change, diagnostics)
+            .await
         {
             Ok(resolved) => resolved,
             Err(error) => {
@@ -357,7 +363,9 @@ pub(crate) fn merge_stack(
                 entry.pr_number,
                 &config.trunk,
                 diagnostics,
-            ) {
+            )
+            .await
+            {
                 if let Some(progress) = checking_progress {
                     ui_finish_progress_bar(progress);
                 }
@@ -399,6 +407,7 @@ pub(crate) fn merge_stack(
     // one shared backoff sleep per round (a no-op in dry-run, where nothing was
     // flagged for settling).
     settle_candidates_mergeability(runner, &context.github, &mut candidates, diagnostics)
+        .await
         .map_err(|error| phase_error("merge-pr-lookup", "stack", error))?;
 
     // Pass 3: validate each PR and record it for the push.
@@ -439,6 +448,7 @@ pub(crate) fn merge_stack(
 
     if diagnostics.dry_run {
         validate_trunk_fast_forward_over_stack(runner, config, &top.commit_id, sync_command)
+            .await
             .map_err(|error| merge_push_error(&config.trunk, error))?;
         diagnostics.plan_line(&format!(
             "- fast-forward trunk `{}` to {} ({})",
@@ -466,11 +476,13 @@ pub(crate) fn merge_stack(
     // individual commits (no squash).
     diagnostics.phase("merge-push");
     fast_forward_trunk_over_stack(runner, config, &top.commit_id, sync_command, diagnostics)
+        .await
         .map_err(|error| merge_push_error(&config.trunk, error))?;
     summary.submit_runs += 1;
 
     // GitHub marks each PR merged asynchronously once its head lands in trunk.
     verify_prs_merged(runner, &context.github, &pr_numbers, diagnostics)
+        .await
         .map_err(|error| phase_error("verify-merge", &context.github.repo, error))?;
     summary.merged_prs = pr_numbers.len();
 
@@ -484,11 +496,13 @@ pub(crate) fn merge_stack(
         &context.github,
         &merged_branches,
         diagnostics,
-    );
+    )
+    .await;
 
     // Leave the working copy on a fresh empty change on top of the new trunk.
     diagnostics.phase("reset-working-copy");
     reset_working_copy_to_trunk(runner, config, diagnostics)
+        .await
         .map_err(|error| phase_error("reset-working-copy", &config.trunk, error))?;
 
     Ok(summary)
@@ -497,7 +511,7 @@ pub(crate) fn merge_stack(
 /// Re-point a PR's base branch to `trunk` so that a fast-forward push of trunk
 /// is recognized by GitHub as merging the PR (GitHub keys auto-merge off the
 /// PR's base branch, not just any branch the head lands in).
-pub(crate) fn repoint_pr_base(
+pub(crate) async fn repoint_pr_base(
     runner: &impl CommandRunner,
     github: &GitHubContext,
     pr_number: u64,
@@ -519,7 +533,7 @@ pub(crate) fn repoint_pr_base(
         return Ok(());
     }
     diagnostics.command("gh", &args);
-    let output = gh_run(runner, &args)?;
+    let output = gh_run(runner, &args).await?;
     if !output.success {
         bail!(
             "failed-command=`{}` error={}",
@@ -532,7 +546,7 @@ pub(crate) fn repoint_pr_base(
 
 /// Fast-forward the local trunk bookmark over the merged stack and push it once.
 /// Refuses anything but a strict fast-forward over the current remote tip.
-pub(crate) fn fast_forward_trunk_over_stack(
+pub(crate) async fn fast_forward_trunk_over_stack(
     runner: &impl CommandRunner,
     config: &AppConfig,
     top_commit: &str,
@@ -546,22 +560,22 @@ pub(crate) fn fast_forward_trunk_over_stack(
     // MergeSyncRequired (which merge recovers from by offering sync+submit)
     // instead of jj refusing the push with "stale info", a state rerunning
     // merge could never clear because it never fetched.
-    fetch_remote_preserving_local_commits(runner, config, diagnostics)?;
+    fetch_remote_preserving_local_commits(runner, config, diagnostics).await?;
 
-    validate_trunk_fast_forward_over_stack(runner, config, top_commit, sync_command)?;
+    validate_trunk_fast_forward_over_stack(runner, config, top_commit, sync_command).await?;
 
     // jj's default `git.auto-local-bookmark = false` leaves a fetched remote
     // trunk bookmark untracked, and `jj bookmark set <trunk>` below then creates
     // a *separate* non-tracking local bookmark. The subsequent push would fail
     // with "Non-tracking remote bookmark <trunk>@<remote> exists". Repair it
     // here (with a warning) instead of bailing.
-    ensure_trunk_tracked(runner, config, diagnostics)?;
+    ensure_trunk_tracked(runner, config, diagnostics).await?;
 
-    let previous_trunk = git_rev_parse(runner, &config.trunk)?;
+    let previous_trunk = git_rev_parse(runner, &config.trunk).await?;
 
     let set_args = ["bookmark", "set", config.trunk.as_str(), "-r", top_commit];
     diagnostics.command("jj", &set_args);
-    let set = runner.run("jj", &set_args)?;
+    let set = runner.run("jj", &set_args).await?;
     if !set.success {
         bail!(
             "failed-command=`{}` error={}",
@@ -579,7 +593,7 @@ pub(crate) fn fast_forward_trunk_over_stack(
         config.trunk.as_str(),
     ];
     diagnostics.command("jj", &push_args);
-    let push = runner.run("jj", &push_args)?;
+    let push = runner.run("jj", &push_args).await?;
     if !push.success {
         // The bookmark already moved to the stack top; leaving it there after
         // a failed push strands local trunk on unmerged commits, a diverged
@@ -594,7 +608,7 @@ pub(crate) fn fast_forward_trunk_over_stack(
             previous_trunk.as_str(),
         ];
         diagnostics.command("jj", &restore_args);
-        match runner.run("jj", &restore_args) {
+        match runner.run("jj", &restore_args).await {
             Ok(restore) if restore.success => {}
             _ => ui_warn!(
                 "failed to restore trunk `{}` to {} after the failed push",
@@ -623,18 +637,19 @@ pub(crate) fn merge_push_error(object: impl Display, error: anyhow::Error) -> an
 }
 
 #[tracing::instrument(skip_all, fields(top = %top_commit))]
-pub(crate) fn validate_trunk_fast_forward_over_stack(
+pub(crate) async fn validate_trunk_fast_forward_over_stack(
     runner: &impl CommandRunner,
     config: &AppConfig,
     top_commit: &str,
     sync_command: &str,
 ) -> Result<()> {
     let remote_git_ref = remote_git_ref(config);
-    let remote = git_rev_parse(runner, &remote_git_ref)?;
+    let remote = git_rev_parse(runner, &remote_git_ref).await?;
     let is_ancestor = git_run(
         runner,
         &["merge-base", "--is-ancestor", remote.as_str(), top_commit],
-    )?;
+    )
+    .await?;
     if !is_ancestor.success {
         return Err(MergeSyncRequired::new(
             format!(
@@ -657,12 +672,12 @@ pub(crate) fn validate_trunk_fast_forward_over_stack(
 /// creates a non-tracking local bookmark, so the fast-forward push would abort
 /// with "Non-tracking remote bookmark <trunk>@<remote> exists". Rather than fail
 /// the merge over a recoverable local-state quirk, auto-track it and warn.
-pub(crate) fn ensure_trunk_tracked(
+pub(crate) async fn ensure_trunk_tracked(
     runner: &impl CommandRunner,
     config: &AppConfig,
     diagnostics: Diagnostics,
 ) -> Result<()> {
-    let status = remote_bookmark_status(runner, config, &config.trunk)?;
+    let status = remote_bookmark_status(runner, config, &config.trunk).await?;
     if status.tracked {
         return Ok(());
     }
@@ -675,7 +690,7 @@ pub(crate) fn ensure_trunk_tracked(
         "trunk `{}@{}` was untracked before merge push; auto-tracking",
         config.trunk, config.remote
     ));
-    track_remote_bookmark(runner, config, &config.trunk, diagnostics)
+    track_remote_bookmark(runner, config, &config.trunk, diagnostics).await
 }
 
 /// Poll GitHub until every PR is marked merged. GitHub applies the
@@ -697,7 +712,7 @@ pub(crate) fn poll_backoff_sleep(delay_ms: u64) -> u64 {
     delay_ms.saturating_mul(2).min(POLL_MAX_DELAY_MS)
 }
 
-pub(crate) fn verify_prs_merged(
+pub(crate) async fn verify_prs_merged(
     runner: &impl CommandRunner,
     github: &GitHubContext,
     pr_numbers: &[u64],
@@ -708,7 +723,13 @@ pub(crate) fn verify_prs_merged(
     let progress = diagnostics.progress_bar("Verifying", "merged PRs", total);
     let mut delay_ms = POLL_INITIAL_DELAY_MS;
     for attempt in 0..POLL_MAX_ATTEMPTS {
-        pending.retain(|&pr_number| !pr_is_merged(runner, github, pr_number).unwrap_or(false));
+        let mut still_pending = Vec::new();
+        for &pr_number in &pending {
+            if !pr_is_merged(runner, github, pr_number).await.unwrap_or(false) {
+                still_pending.push(pr_number);
+            }
+        }
+        pending = still_pending;
         if let Some(progress) = &progress {
             progress.set_position((total - pending.len()) as u64);
         }
@@ -748,7 +769,7 @@ pub(crate) fn verify_prs_merged(
     );
 }
 
-pub(crate) fn pr_is_merged(
+pub(crate) async fn pr_is_merged(
     runner: &impl CommandRunner,
     github: &GitHubContext,
     pr_number: u64,
@@ -765,7 +786,7 @@ pub(crate) fn pr_is_merged(
         "--jq",
         ".state",
     ];
-    let output = gh_run(runner, &args)?;
+    let output = gh_run(runner, &args).await?;
     if !output.success {
         bail!(
             "failed-command=`{}` error={}",
@@ -777,14 +798,14 @@ pub(crate) fn pr_is_merged(
 }
 
 /// Leave the working copy on a fresh empty change on top of the new trunk tip.
-pub(crate) fn reset_working_copy_to_trunk(
+pub(crate) async fn reset_working_copy_to_trunk(
     runner: &impl CommandRunner,
     config: &AppConfig,
     diagnostics: Diagnostics,
 ) -> Result<()> {
     let args = ["new", config.trunk.as_str()];
     diagnostics.command("jj", &args);
-    let output = runner.run("jj", &args)?;
+    let output = runner.run("jj", &args).await?;
     if !output.success {
         bail!(
             "failed-command=`{}` error={}",
@@ -799,7 +820,7 @@ pub(crate) fn reset_working_copy_to_trunk(
 /// branch would cascade-close that PR (a stacked PR closes when its base branch
 /// is deleted), so callers must refuse to clean up a branch that still anchors
 /// an open PR.
-pub(crate) fn open_pr_bases_on_branch(
+pub(crate) async fn open_pr_bases_on_branch(
     runner: &impl CommandRunner,
     github: &GitHubContext,
     branch: &str,
@@ -816,7 +837,7 @@ pub(crate) fn open_pr_bases_on_branch(
         "--json",
         "number",
     ];
-    let output = gh_run(runner, &args)?;
+    let output = gh_run(runner, &args).await?;
     if !output.success {
         bail!(
             "failed-command=`{}` error={}",
@@ -842,7 +863,7 @@ pub(crate) fn open_pr_bases_on_branch(
 /// stacked PR closes when its base branch is deleted). Best-effort throughout: a
 /// failed guard/delete/push warns rather than erroring, since the merge or sync
 /// it follows has already succeeded. Returns how many branches were removed.
-pub(crate) fn cleanup_merged_branches(
+pub(crate) async fn cleanup_merged_branches(
     runner: &impl CommandRunner,
     config: &AppConfig,
     github: &GitHubContext,
@@ -853,7 +874,7 @@ pub(crate) fn cleanup_merged_branches(
     let mut cleaned = 0;
     let progress = diagnostics.progress_bar("Cleaning", "branches", branches.len());
     for (index, branch) in branches.iter().enumerate() {
-        match open_pr_bases_on_branch(runner, github, branch) {
+        match open_pr_bases_on_branch(runner, github, branch).await {
             Ok(true) => {
                 diagnostics.warn(format!(
                     "skipping cleanup of `{branch}`: an open PR still targets it as its base"
@@ -885,7 +906,7 @@ pub(crate) fn cleanup_merged_branches(
             }
             continue;
         }
-        match delete_bookmark(runner, branch, diagnostics) {
+        match delete_bookmark(runner, branch, diagnostics).await {
             Ok(()) => {
                 cleaned += 1;
                 to_push.push(branch);
@@ -902,7 +923,7 @@ pub(crate) fn cleanup_merged_branches(
         ui_finish_progress_bar(progress);
     }
     if !to_push.is_empty() {
-        if let Err(error) = push_bookmark_deletions(runner, config, &to_push, diagnostics) {
+        if let Err(error) = push_bookmark_deletions(runner, config, &to_push, diagnostics).await {
             diagnostics.warn(format!(
                 "could not push branch deletion(s) to `{}`: {error:#}",
                 config.remote
@@ -917,7 +938,7 @@ pub(crate) fn cleanup_merged_branches(
         // so the post-merge state is clean immediately. Purely local and
         // best-effort: if the push already removed the bookmark this is a no-op.
         for branch in &to_push {
-            forget_bookmark_tracking(runner, branch, diagnostics);
+            forget_bookmark_tracking(runner, branch, diagnostics).await;
         }
     }
     cleaned
@@ -927,20 +948,20 @@ pub(crate) fn cleanup_merged_branches(
 /// a prior merge). A branch is "landed" when its commit is an ancestor of the
 /// remote trunk tip, which for the fast-forward merge model means its PR merged.
 /// Returns the number of branches removed.
-pub(crate) fn cleanup_landed_branches(
+pub(crate) async fn cleanup_landed_branches(
     runner: &impl CommandRunner,
     config: &AppConfig,
     diagnostics: Diagnostics,
 ) -> Result<usize> {
-    let bookmarks = local_stack_bookmarks(runner, config)?;
+    let bookmarks = local_stack_bookmarks(runner, config).await?;
     if bookmarks.is_empty() {
         return Ok(0);
     }
-    let trunk_tip = git_rev_parse(runner, &remote_git_ref(config))?;
+    let trunk_tip = git_rev_parse(runner, &remote_git_ref(config)).await?;
     let mut landed = Vec::new();
     for branch in bookmarks {
-        let commit = jj_ref_commit_id(runner, &branch)?;
-        if git_commit_is_ancestor(runner, &commit, &trunk_tip)? {
+        let commit = jj_ref_commit_id(runner, &branch).await?;
+        if git_commit_is_ancestor(runner, &commit, &trunk_tip).await? {
             landed.push(branch);
         }
     }
@@ -949,9 +970,10 @@ pub(crate) fn cleanup_landed_branches(
     }
 
     let github = GitHubContext::resolve(runner)
+        .await
         .context("resolve GitHub repository for merged-branch cleanup")?;
-    let cleaned = cleanup_merged_branches(runner, config, &github, &landed, diagnostics);
-    Ok(cleaned + cleanup_landed_conflicted_bookmarks(runner, config, diagnostics)?)
+    let cleaned = cleanup_merged_branches(runner, config, &github, &landed, diagnostics).await;
+    Ok(cleaned + cleanup_landed_conflicted_bookmarks(runner, config, diagnostics).await?)
 }
 
 /// Prune conflicted `<prefix>/*` bookmarks whose named change has already landed
@@ -961,18 +983,18 @@ pub(crate) fn cleanup_landed_branches(
 /// Purely local and best-effort — the merged remote branch is already gone, and
 /// each deletion is undoable via `jj op undo`.
 #[tracing::instrument(skip_all)]
-pub(crate) fn cleanup_landed_conflicted_bookmarks(
+pub(crate) async fn cleanup_landed_conflicted_bookmarks(
     runner: &impl CommandRunner,
     config: &AppConfig,
     diagnostics: Diagnostics,
 ) -> Result<usize> {
-    let conflicted = conflicted_local_stack_bookmarks(runner, config)?;
+    let conflicted = conflicted_local_stack_bookmarks(runner, config).await?;
     let mut cleaned = 0;
     for branch in conflicted {
         let Some(change_prefix) = stack_bookmark_change_id_prefix(&branch) else {
             continue;
         };
-        if !change_landed_in_trunk(runner, change_prefix)? {
+        if !change_landed_in_trunk(runner, change_prefix).await? {
             continue;
         }
         if diagnostics.dry_run {
@@ -981,11 +1003,11 @@ pub(crate) fn cleanup_landed_conflicted_bookmarks(
             cleaned += 1;
             continue;
         }
-        match delete_bookmark(runner, &branch, diagnostics) {
+        match delete_bookmark(runner, &branch, diagnostics).await {
             Ok(()) => {
                 cleaned += 1;
                 // Drop any dangling tracking ref too, without touching the remote.
-                forget_bookmark_tracking(runner, &branch, diagnostics);
+                forget_bookmark_tracking(runner, &branch, diagnostics).await;
             }
             Err(error) => diagnostics.warn(format!(
                 "could not delete conflicted bookmark `{branch}`: {error:#}"
@@ -999,10 +1021,10 @@ pub(crate) fn cleanup_landed_conflicted_bookmarks(
 /// (i.e. the change merged). A prefix that no longer resolves is treated as
 /// not-landed so cleanup leaves the bookmark untouched.
 #[tracing::instrument(level = "trace", skip_all)]
-fn change_landed_in_trunk(runner: &impl CommandRunner, change_id_prefix: &str) -> Result<bool> {
+async fn change_landed_in_trunk(runner: &impl CommandRunner, change_id_prefix: &str) -> Result<bool> {
     let revset = format!("change_id({change_id_prefix}) & ::trunk()");
     let args = ["log", "--no-graph", "-r", &revset, "-T", "\"x\\n\""];
-    let output = runner.run("jj", &args)?;
+    let output = runner.run("jj", &args).await?;
     if !output.success {
         return Ok(false);
     }
@@ -1018,19 +1040,19 @@ fn change_landed_in_trunk(runner: &impl CommandRunner, change_id_prefix: &str) -
 /// submitting drops the merged PRs from those comments and pushes the rebased
 /// branches. Resolves to the post-merge stack, so merged/abandoned changes are
 /// already absent; if nothing remains above the target this is a no-op.
-pub(crate) fn refresh_stack_above_merge(
+pub(crate) async fn refresh_stack_above_merge(
     runner: &impl CommandRunner,
     config: &AppConfig,
     revset: &str,
     diagnostics: Diagnostics,
 ) -> Result<()> {
-    let remaining = resolve_stack(runner, revset)?;
+    let remaining = resolve_stack(runner, revset).await?;
     if remaining.is_empty() {
         return Ok(());
     }
 
     diagnostics.phase("merge-refresh-above");
-    let context = resolve_stack_context(runner, revset)?;
+    let context = resolve_stack_context(runner, revset).await?;
     submit_stack(
         runner,
         config,
@@ -1038,11 +1060,12 @@ pub(crate) fn refresh_stack_above_merge(
         true,
         "forklift submit --yes",
         diagnostics,
-    )?;
+    )
+    .await?;
     Ok(())
 }
 
-pub(crate) fn validate_merge_frozen_dependencies(
+pub(crate) async fn validate_merge_frozen_dependencies(
     runner: &impl CommandRunner,
     config: &AppConfig,
     context: &AppContext,
@@ -1058,7 +1081,8 @@ pub(crate) fn validate_merge_frozen_dependencies(
             &context.github,
             &dependency.change.change_id,
             dependency.bookmark.pr_number,
-        )?;
+        )
+        .await?;
         if pr.state.eq_ignore_ascii_case("OPEN") {
             bail!(
                 CliError::new(format!(
@@ -1095,16 +1119,16 @@ pub(crate) fn validate_merge_frozen_dependencies(
     Ok(())
 }
 
-pub(crate) fn resolve_merge_pr(
+pub(crate) async fn resolve_merge_pr(
     runner: &impl CommandRunner,
     config: &AppConfig,
     context: &AppContext,
     change: &ResolvedChange,
     diagnostics: Diagnostics,
 ) -> Result<(PrCacheEntry, GhMergePr)> {
-    let store = CacheStore::load_current_best_effort(runner, diagnostics, "merge")?;
+    let store = CacheStore::load_current_best_effort(runner, diagnostics, "merge").await?;
     if let Some(entry) = store.get_pr(&context.github.repo, &change.change_id) {
-        match resolve_merge_cached_pr(runner, config, &context.github, change, entry) {
+        match resolve_merge_cached_pr(runner, config, &context.github, change, entry).await {
             Ok(resolved) => return Ok(resolved),
             Err(error) => diagnostics.warn(format!(
                 "phase=merge-pr-lookup object=cache:{} error=ignored stale cache hint: {error:#}",
@@ -1113,18 +1137,18 @@ pub(crate) fn resolve_merge_pr(
         }
     }
 
-    resolve_merge_pr_from_live_bookmarks(runner, config, &context.github, change)
+    resolve_merge_pr_from_live_bookmarks(runner, config, &context.github, change).await
 }
 
 #[tracing::instrument(skip_all, fields(change = %change.change_id, pr = entry.pr_number))]
-pub(crate) fn resolve_merge_cached_pr(
+pub(crate) async fn resolve_merge_cached_pr(
     runner: &impl CommandRunner,
     config: &AppConfig,
     github: &GitHubContext,
     change: &ResolvedChange,
     entry: &PrCacheEntry,
 ) -> Result<(PrCacheEntry, GhMergePr)> {
-    let pr = fetch_pr_for_merge(runner, github, &change.change_id, entry.pr_number)?;
+    let pr = fetch_pr_for_merge(runner, github, &change.change_id, entry.pr_number).await?;
     if pr.head_ref_name != entry.head_branch {
         bail!(CliError::new(format!(
             "cache points to PR #{} on `{}`, but GitHub reports `{}`",
@@ -1133,24 +1157,24 @@ pub(crate) fn resolve_merge_cached_pr(
     }
 
     let live_entry = pr.clone().into_cache_entry(entry.stack_comment_id.clone());
-    validate_submit_bookmark_state(runner, config, change, &live_entry)?;
+    validate_submit_bookmark_state(runner, config, change, &live_entry).await?;
     Ok((live_entry, pr))
 }
 
 #[tracing::instrument(skip_all, fields(change = %change.change_id))]
-pub(crate) fn resolve_merge_pr_from_live_bookmarks(
+pub(crate) async fn resolve_merge_pr_from_live_bookmarks(
     runner: &impl CommandRunner,
     config: &AppConfig,
     github: &GitHubContext,
     change: &ResolvedChange,
 ) -> Result<(PrCacheEntry, GhMergePr)> {
     let mut matches = Vec::new();
-    for head_branch in local_stack_bookmarks_for_change(runner, config, change)? {
+    for head_branch in local_stack_bookmarks_for_change(runner, config, change).await? {
         if let Some(entry) =
-            lookup_open_pr_by_head_branch(runner, github, &change.change_id, &head_branch)?
+            lookup_open_pr_by_head_branch(runner, github, &change.change_id, &head_branch).await?
         {
-            validate_submit_bookmark_state(runner, config, change, &entry)?;
-            let pr = fetch_pr_for_merge(runner, github, &change.change_id, entry.pr_number)?;
+            validate_submit_bookmark_state(runner, config, change, &entry).await?;
+            let pr = fetch_pr_for_merge(runner, github, &change.change_id, entry.pr_number).await?;
             if pr.head_ref_name != head_branch {
                 bail!(CliError::new(format!(
                     "PR #{} head branch is `{}`, but live bookmark discovery found `{}`",
@@ -1182,7 +1206,7 @@ pub(crate) fn resolve_merge_pr_from_live_bookmarks(
 }
 
 #[tracing::instrument(skip_all, fields(change = %change_id, pr = pr_number))]
-pub(crate) fn fetch_pr_for_merge(
+pub(crate) async fn fetch_pr_for_merge(
     runner: &impl CommandRunner,
     github: &GitHubContext,
     change_id: &str,
@@ -1198,7 +1222,7 @@ pub(crate) fn fetch_pr_for_merge(
         "--json",
         MERGE_PR_JSON_FIELDS,
     ];
-    let output = gh_run(runner, &args)?;
+    let output = gh_run(runner, &args).await?;
     if !output.success {
         bail!(
             "failed-api=`{}` error={} change:{}",
@@ -1239,7 +1263,7 @@ pub(crate) struct MergeCandidate<'a> {
 /// whole set together turns sum-of-waits into max-of-waits. Each candidate's `pr`
 /// is refreshed in place; PRs that never settle keep their last value so
 /// validation can surface a clear error.
-pub(crate) fn settle_candidates_mergeability(
+pub(crate) async fn settle_candidates_mergeability(
     runner: &impl CommandRunner,
     github: &GitHubContext,
     candidates: &mut [MergeCandidate<'_>],
@@ -1268,7 +1292,9 @@ pub(crate) fn settle_candidates_mergeability(
                 github,
                 &candidate.change.change_id,
                 candidate.entry.pr_number,
-            ) {
+            )
+            .await
+            {
                 Ok(pr) => pr,
                 Err(error) => {
                     if let Some(progress) = progress {

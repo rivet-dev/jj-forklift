@@ -1,7 +1,7 @@
 use super::super::cli::*;
 use super::super::*;
 
-pub(crate) fn run(
+pub(crate) async fn run(
     runner: &impl CommandRunner,
     config: &AppConfig,
     options: UiOptions,
@@ -38,6 +38,7 @@ pub(crate) fn run(
     let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
     runner
         .run_interactive("jjui", &borrowed)
+        .await
         .map_err(|error| phase_error("ui", "jjui", error))?;
 
     Ok(())

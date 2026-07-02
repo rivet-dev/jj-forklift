@@ -2,7 +2,7 @@ use super::super::*;
 use super::*;
 
 #[tracing::instrument(skip_all, fields(target = target))]
-pub(crate) fn repair_stack_comments(
+pub(crate) async fn repair_stack_comments(
     runner: &impl CommandRunner,
     config: &AppConfig,
     target: &str,
@@ -11,12 +11,13 @@ pub(crate) fn repair_stack_comments(
 ) -> Result<RepairSummary> {
     diagnostics.phase("resolve-github");
     let mut github = GitHubContext::resolve(runner)
+        .await
         .map_err(|error| phase_error("resolve-github", "github", error))?;
     let target = parse_get_target(target, &github.repo)?;
     github.repo = target.repo().to_owned();
 
     diagnostics.phase("resolve-stack-comment");
-    let target_pr = resolve_get_target_pr(runner, &github, target)?;
+    let target_pr = resolve_get_target_pr(runner, &github, target).await?;
     if !target_pr.state.eq_ignore_ascii_case("OPEN") {
         bail!(
             CliError::new(format!(
@@ -26,7 +27,7 @@ pub(crate) fn repair_stack_comments(
             .resolution("choose an open PR whose stack comment should be repaired")
         );
     }
-    let comment = latest_stack_comment(runner, &github, target_pr.number, "repair")?;
+    let comment = latest_stack_comment(runner, &github, target_pr.number, "repair").await?;
     let mut pr_numbers = comment
         .as_ref()
         .map(|comment| parse_stack_pr_numbers(&comment.body))
@@ -43,7 +44,8 @@ pub(crate) fn repair_stack_comments(
     }
 
     diagnostics.phase("resolve-prs");
-    let plan = plan_stack_comment_repair(runner, config, &github, target_pr.number, pr_numbers)?;
+    let plan =
+        plan_stack_comment_repair(runner, config, &github, target_pr.number, pr_numbers).await?;
     let actions = repair_actions(&github, config, &plan);
     print_repair_action_plan(&plan, &actions, diagnostics);
 
@@ -63,13 +65,13 @@ pub(crate) fn repair_stack_comments(
 
     diagnostics.phase("stack-comments");
     for action in &actions {
-        if execute_repair_action(runner, &github, action, diagnostics)? {
+        if execute_repair_action(runner, &github, action, diagnostics).await? {
             summary.comments_changed += 1;
         }
     }
 
     diagnostics.phase("repair-validate");
-    validate_repair_result(runner, config, &github, target_pr.number, &plan)?;
+    validate_repair_result(runner, config, &github, target_pr.number, &plan).await?;
 
     Ok(summary)
 }
@@ -221,7 +223,7 @@ pub(crate) fn confirm_submit_stack(yes: bool, yes_command: &str) -> Result<()> {
         .into())
 }
 
-pub(crate) fn submit_before_retrying_merge(
+pub(crate) async fn submit_before_retrying_merge(
     runner: &impl CommandRunner,
     config: &AppConfig,
     revset: &str,
@@ -247,6 +249,7 @@ pub(crate) fn submit_before_retrying_merge(
 
     diagnostics.phase("merge-submit");
     let context = resolve_stack_context(runner, revset)
+        .await
         .map_err(|error| phase_error("resolve-stack", revset, error))?;
     submit_stack(
         runner,
@@ -255,11 +258,12 @@ pub(crate) fn submit_before_retrying_merge(
         false,
         "forklift submit --yes",
         diagnostics,
-    )?;
+    )
+    .await?;
     Ok(())
 }
 
-pub(crate) fn sync_submit_before_retrying_merge(
+pub(crate) async fn sync_submit_before_retrying_merge(
     runner: &impl CommandRunner,
     config: &AppConfig,
     target: Option<&str>,
@@ -300,6 +304,7 @@ pub(crate) fn sync_submit_before_retrying_merge(
 
     let target_label = target.unwrap_or(DEFAULT_STACK_REVSET);
     let sync_revset = effective_sync_revset(runner, target)
+        .await
         .map_err(|error| phase_error("resolve-sync-target", target_label, error))?;
     sync_stack(
         runner,
@@ -309,11 +314,12 @@ pub(crate) fn sync_submit_before_retrying_merge(
         true,
         true,
         diagnostics,
-    )?;
+    )
+    .await?;
     Ok(())
 }
 
-pub(crate) fn unfreeze_before_retrying_merge(
+pub(crate) async fn unfreeze_before_retrying_merge(
     runner: &impl CommandRunner,
     config: &AppConfig,
     unfreeze_required: &MergeUnfreezeRequired,
@@ -362,7 +368,7 @@ pub(crate) fn unfreeze_before_retrying_merge(
     }
 
     for target in &unfreeze_required.unfreeze_targets {
-        unfreeze_stack(runner, config, target, diagnostics)?;
+        unfreeze_stack(runner, config, target, diagnostics).await?;
     }
     Ok(())
 }
@@ -436,7 +442,7 @@ pub(crate) fn print_repair_plan_line(line: &str) {
     eprintln!("{line}");
 }
 
-pub(crate) fn execute_repair_action(
+pub(crate) async fn execute_repair_action(
     runner: &impl CommandRunner,
     github: &GitHubContext,
     action: &RepairAction,
@@ -445,7 +451,9 @@ pub(crate) fn execute_repair_action(
     match action {
         RepairAction::UpsertStackComment {
             pr_number, body, ..
-        } => match upsert_stack_comment(runner, github, *pr_number, "repair", body, diagnostics)? {
+        } => match upsert_stack_comment(runner, github, *pr_number, "repair", body, diagnostics)
+            .await?
+        {
             StackCommentAction::Created(_) | StackCommentAction::Updated(_, _) => Ok(true),
             StackCommentAction::Unchanged(_) => Ok(false),
         },
@@ -496,19 +504,21 @@ pub(crate) fn confirm_repair_stack_comments(
     }
 }
 
-pub(crate) fn validate_repair_result(
+pub(crate) async fn validate_repair_result(
     runner: &impl CommandRunner,
     config: &AppConfig,
     github: &GitHubContext,
     target_pr_number: u64,
     plan: &RepairPlan,
 ) -> Result<()> {
-    let comment = latest_stack_comment(runner, github, target_pr_number, "repair-validate")?
+    let comment = latest_stack_comment(runner, github, target_pr_number, "repair-validate")
+        .await?
         .with_context(|| format!("repaired PR #{target_pr_number} has no stack comment"))?;
     let mut pr_numbers = parse_stack_pr_numbers(&comment.body);
     pr_numbers.reverse();
     let validation_plan =
         plan_stack_comment_repair(runner, config, github, target_pr_number, pr_numbers)
+            .await
             .context("re-run repair detection on repaired stack comment")?;
     if !validation_plan.pruned_merged_prs.is_empty() {
         bail!(CliError::new(format!(
@@ -532,7 +542,7 @@ pub(crate) fn validate_repair_result(
     Ok(())
 }
 
-pub(crate) fn plan_stack_comment_repair(
+pub(crate) async fn plan_stack_comment_repair(
     runner: &impl CommandRunner,
     config: &AppConfig,
     github: &GitHubContext,
@@ -546,7 +556,7 @@ pub(crate) fn plan_stack_comment_repair(
         if !seen.insert(pr_number) {
             bail!("stack comment listed PR #{} more than once", pr_number);
         }
-        let pr = fetch_pr_by_number(runner, github, "repair", pr_number)?;
+        let pr = fetch_pr_by_number(runner, github, "repair", pr_number).await?;
         validate_get_pr_metadata(github, &pr)?;
         if pr.state.eq_ignore_ascii_case("OPEN") {
             open_prs.push(pr);

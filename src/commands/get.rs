@@ -1,7 +1,7 @@
 use super::super::cli::*;
 use super::super::*;
 
-pub(crate) fn run(
+pub(crate) async fn run(
     runner: &impl CommandRunner,
     config: &AppConfig,
     options: GetOptions,
@@ -15,7 +15,8 @@ pub(crate) fn run(
         &options.target,
         !options.no_edit,
         diagnostics,
-    )?;
+    )
+    .await?;
     if dry_run {
         ui_progress(
             "Finished",
