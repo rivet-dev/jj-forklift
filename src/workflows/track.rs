@@ -233,7 +233,7 @@ async fn set_local_bookmark(
         "--allow-backwards",
     ];
     if diagnostics.dry_run {
-        diagnostics.plan_line(&format!("- {}", display_command("jj", &args)));
+        diagnostics.plan_line(&format!("{}", display_command("jj", &args)));
         return Ok(());
     }
     diagnostics.command("jj", &args);

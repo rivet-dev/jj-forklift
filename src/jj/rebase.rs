@@ -53,13 +53,13 @@ pub(crate) async fn rebase_stack_roots(
 
     if diagnostics.dry_run {
         diagnostics.plan_line(&format!(
-            "- rebase stack root {} ({}) onto {} `{}`",
+            "rebase stack root {} ({}) onto {} `{}`",
             root.change_id,
             root.commit_id,
             destination.label(),
             destination.rev()
         ));
-        diagnostics.plan_line(&format!("- {}", display_command("jj", &args)));
+        diagnostics.plan_line(&format!("{}", display_command("jj", &args)));
         return Ok(1);
     }
 
@@ -89,13 +89,13 @@ pub(crate) async fn rebase_selected_stack(
 
     if diagnostics.dry_run {
         diagnostics.plan_line(&format!(
-            "- rebase targeted stack root {} ({}) onto {} `{}`",
+            "rebase targeted stack root {} ({}) onto {} `{}`",
             root.change_id,
             root.commit_id,
             destination.label(),
             destination.rev()
         ));
-        diagnostics.plan_line(&format!("- {}", display_command("jj", &args)));
+        diagnostics.plan_line(&format!("{}", display_command("jj", &args)));
         return Ok(1);
     }
 

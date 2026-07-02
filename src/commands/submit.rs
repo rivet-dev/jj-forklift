@@ -50,7 +50,7 @@ pub(crate) async fn run(
         if dry_run {
             // The rebase was only planned, so the live commits still fail base
             // validation; stop at the plan rather than submitting stale ids.
-            diagnostics.plan_line("- run submit after the rebase");
+            diagnostics.plan_line("run submit after the rebase");
             ui_progress(
                 "Finished",
                 "submit (dry run) — stack is behind trunk; a real run rebases it, then submits",

@@ -281,7 +281,7 @@ pub(crate) async fn sync_stack(
     }
 
     if diagnostics.dry_run {
-        diagnostics.plan_line("- run submit after sync");
+        diagnostics.plan_line("run submit after sync");
         return Ok(SyncSummary {
             rebased_roots,
             submit_ran: true,
@@ -369,7 +369,7 @@ pub(crate) async fn prune_landed_duplicate_changes(
     }
 
     if diagnostics.dry_run {
-        diagnostics.plan_line(&format!("- {}", display_command("jj", &args)));
+        diagnostics.plan_line(&format!("{}", display_command("jj", &args)));
         return Ok(landed_duplicates
             .iter()
             .map(|change| change.commit_id.clone())
@@ -704,7 +704,7 @@ pub(crate) async fn carry_empty_working_copy_to_trunk(
     let args = ["rebase", "-r", "@", "-d", trunk_tip.as_str()];
     if diagnostics.dry_run {
         diagnostics.plan_line(&format!(
-            "- move the empty working copy onto trunk `{}`",
+            "move the empty working copy onto trunk `{}`",
             config.trunk
         ));
         return Ok(());
@@ -762,7 +762,7 @@ async fn run_targeted_fetch(
         tracing::debug!(remote = %config.remote, "remote refs already current; skipping fetch");
         if diagnostics.dry_run {
             diagnostics.plan_line(&format!(
-                "- remote `{}` refs already current; skip fetch",
+                "remote `{}` refs already current; skip fetch",
                 config.remote
             ));
         }
@@ -911,7 +911,7 @@ async fn run_fetch_remote_command(
     args: &[&str],
 ) -> Result<()> {
     if diagnostics.dry_run {
-        diagnostics.plan_line(&format!("- {}", display_command("jj", args)));
+        diagnostics.plan_line(&format!("{}", display_command("jj", args)));
         return Ok(());
     }
 
@@ -997,7 +997,7 @@ pub(crate) async fn move_trunk_to_remote(
     }
 
     if local == remote {
-        diagnostics.plan_line(&format!("- leave trunk `{}` at {}", config.trunk, local));
+        diagnostics.plan_line(&format!("leave trunk `{}` at {}", config.trunk, local));
         return Ok(());
     }
 
@@ -1048,16 +1048,16 @@ pub(crate) async fn move_trunk_to_remote(
     if diagnostics.dry_run {
         if stranded_recovery {
             diagnostics.plan_line(&format!(
-                "- move trunk `{}` back from {} to {} (every stranded commit keeps its own bookmark)",
+                "move trunk `{}` back from {} to {} (every stranded commit keeps its own bookmark)",
                 config.trunk, local, remote
             ));
         } else {
             diagnostics.plan_line(&format!(
-                "- fast-forward trunk `{}` from {} to {}",
+                "fast-forward trunk `{}` from {} to {}",
                 config.trunk, local, remote
             ));
         }
-        diagnostics.plan_line(&format!("- {}", display_command("jj", &args)));
+        diagnostics.plan_line(&format!("{}", display_command("jj", &args)));
         return Ok(());
     }
 

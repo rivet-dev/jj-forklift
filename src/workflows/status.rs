@@ -310,7 +310,7 @@ pub(crate) async fn print_status_stack_log(
     revset: &str,
 ) -> Result<()> {
     if revset.is_empty() {
-        ui_info!("- <none>");
+        ui_info!("<none>");
         return Ok(());
     }
     let args = ["log", "--color=always", "-r", revset];

@@ -76,14 +76,14 @@ pub(crate) async fn get_stack(
     if diagnostics.dry_run {
         update_get_frozen_bookmarks(runner, &prs, diagnostics).await?;
         if auto_edit {
-            diagnostics.plan_line(&format!("- move working copy: {next_command}"));
+            diagnostics.plan_line(&format!("move working copy: {next_command}"));
         } else {
             diagnostics.plan_line(&format!(
-                "- skip editing: run `{next_command}` to start editing above the targeted PR"
+                "skip editing: run `{next_command}` to start editing above the targeted PR"
             ));
         }
         diagnostics.plan_line(
-            "- live GitHub discovery ran during planning; SQLite cache writes are skipped",
+            "live GitHub discovery ran during planning; SQLite cache writes are skipped",
         );
         return Ok(GetSummary {
             prs: pr_count,

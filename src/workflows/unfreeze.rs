@@ -89,7 +89,7 @@ pub(crate) async fn unfreeze_stack(
 
     diagnostics.phase("write-cache");
     if diagnostics.dry_run {
-        diagnostics.plan_line("- SQLite cache writes are skipped");
+        diagnostics.plan_line("SQLite cache writes are skipped");
     } else {
         let mut store = CacheStore::load_current_best_effort(runner, diagnostics, "write-cache")
             .await

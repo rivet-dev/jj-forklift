@@ -161,7 +161,7 @@ pub(super) async fn ensure_startup_config(
     if diagnostics.dry_run {
         for action in actions {
             diagnostics.plan_line(&format!(
-                "- set repo jj config {} = {}",
+                "set repo jj config {} = {}",
                 action.key, action.value
             ));
         }

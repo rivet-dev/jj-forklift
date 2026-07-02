@@ -10,7 +10,7 @@ pub(crate) async fn update_get_frozen_bookmarks(
         for pr in prs {
             let bookmark = frozen_bookmark_name(pr.number);
             diagnostics.plan_line(&format!(
-                "- set frozen bookmark {bookmark} -> {}",
+                "set frozen bookmark {bookmark} -> {}",
                 pr.head_ref_oid
             ));
         }
@@ -452,7 +452,7 @@ pub(crate) async fn track_remote_bookmark(
         branch,
     ];
     if diagnostics.dry_run {
-        diagnostics.plan_line(&format!("- {}", display_command("jj", &args)));
+        diagnostics.plan_line(&format!("{}", display_command("jj", &args)));
         return Ok(());
     }
     diagnostics.command("jj", &args);
@@ -475,7 +475,7 @@ pub(crate) async fn delete_bookmark(
 ) -> Result<()> {
     let args = ["bookmark", "delete", bookmark];
     if diagnostics.dry_run {
-        diagnostics.plan_line(&format!("- {}", display_command("jj", &args)));
+        diagnostics.plan_line(&format!("{}", display_command("jj", &args)));
         return Ok(());
     }
     diagnostics.command("jj", &args);

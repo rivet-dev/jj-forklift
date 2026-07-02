@@ -471,21 +471,21 @@ pub(crate) async fn merge_stack(
             .await
             .map_err(|error| merge_push_error(&config.trunk, error))?;
         diagnostics.plan_line(&format!(
-            "- fast-forward trunk `{}` to {} ({})",
+            "fast-forward trunk `{}` to {} ({})",
             config.trunk, top.change_id, top.commit_id
         ));
         diagnostics.plan_line(&format!(
-            "- push trunk `{}` to {} in a single push; GitHub auto-merges {} PR(s) by reachability",
+            "push trunk `{}` to {} in a single push; GitHub auto-merges {} PR(s) by reachability",
             config.trunk,
             config.remote,
             pr_numbers.len()
         ));
         for pr_number in &pr_numbers {
-            diagnostics.plan_line(&format!("- expect PR #{pr_number} to be marked merged"));
+            diagnostics.plan_line(&format!("expect PR #{pr_number} to be marked merged"));
         }
         for branch in &merged_branches {
             diagnostics.plan_line(&format!(
-                "- delete merged branch `{branch}` locally and on `{}`",
+                "delete merged branch `{branch}` locally and on `{}`",
                 config.remote
             ));
         }
@@ -549,7 +549,10 @@ pub(crate) async fn repoint_pr_base(
         base_arg.as_str(),
     ];
     if diagnostics.dry_run {
-        diagnostics.plan_line(&format!("- {}", display_command("gh", &args)));
+        // Don't narrate the per-PR base re-point PATCH: on a large stack it's one
+        // noisy `gh api` line per PR that drowns the real plan (the fast-forward
+        // and single push the merge actually turns on). The plan summary below
+        // already states GitHub auto-merges the PRs by reachability.
         return Ok(());
     }
     diagnostics.command("gh", &args);
@@ -927,7 +930,7 @@ pub(crate) async fn cleanup_merged_branches(
         }
         if diagnostics.dry_run {
             diagnostics.plan_line(&format!(
-                "- delete merged branch `{branch}` locally and on `{}`",
+                "delete merged branch `{branch}` locally and on `{}`",
                 config.remote
             ));
             cleaned += 1;
@@ -1043,7 +1046,7 @@ pub(crate) async fn cleanup_landed_conflicted_bookmarks(
         }
         if diagnostics.dry_run {
             diagnostics
-                .plan_line(&format!("- delete landed conflicted bookmark `{branch}` locally"));
+                .plan_line(&format!("delete landed conflicted bookmark `{branch}` locally"));
             cleaned += 1;
             continue;
         }

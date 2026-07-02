@@ -108,31 +108,31 @@ impl Diagnostics {
         for plan in plans {
             if plan.push_needed {
                 self.plan_line(&format!(
-                    "- set bookmark {} to {} and push to {}",
+                    "set bookmark {} to {} and push to {}",
                     plan.head_branch, plan.change.commit_id, config.remote
                 ));
             } else {
                 self.plan_line(&format!(
-                    "- leave bookmark {} at {}",
+                    "leave bookmark {} at {}",
                     plan.head_branch, plan.change.commit_id
                 ));
             }
 
             if plan.push_needed {
                 self.plan_line(&format!(
-                    "- push bookmark {} to {}/{}",
+                    "push bookmark {} to {}/{}",
                     plan.head_branch, config.remote, plan.head_branch
                 ));
             } else {
                 self.plan_line(&format!(
-                    "- leave remote branch {}/{} unchanged at {}",
+                    "leave remote branch {}/{} unchanged at {}",
                     config.remote, plan.head_branch, plan.change.commit_id
                 ));
             }
 
             if plan.push_needed {
                 self.plan_line(&format!(
-                    "- verify remote lease for {}: expected {}",
+                    "verify remote lease for {}: expected {}",
                     plan.head_branch,
                     plan.expected_remote_head.as_deref().unwrap_or("<absent>")
                 ));
@@ -140,26 +140,26 @@ impl Diagnostics {
 
             match &plan.existing_pr {
                 None => self.plan_line(&format!(
-                    "- create PR for {}: head={} base={}",
+                    "create PR for {}: head={} base={}",
                     plan.change.change_id, plan.head_branch, plan.base_branch
                 )),
                 Some(existing) if plan.pr_update_needed => self.plan_line(&format!(
-                    "- update PR #{} for {}: head={} base={}",
+                    "update PR #{} for {}: head={} base={}",
                     existing.pr_number, plan.change.change_id, plan.head_branch, plan.base_branch
                 )),
                 Some(existing) => self.plan_line(&format!(
-                    "- leave PR #{} unchanged for {}",
+                    "leave PR #{} unchanged for {}",
                     existing.pr_number, plan.change.change_id
                 )),
             }
 
             match &plan.existing_pr {
                 Some(existing) => self.plan_line(&format!(
-                    "- upsert stack comment on PR #{} for {}",
+                    "upsert stack comment on PR #{} for {}",
                     existing.pr_number, plan.change.change_id
                 )),
                 None => self.plan_line(&format!(
-                    "- upsert stack comment after creating PR for {}",
+                    "upsert stack comment after creating PR for {}",
                     plan.change.change_id
                 )),
             }
@@ -169,7 +169,7 @@ impl Diagnostics {
             && plans.iter().all(|plan| !plan.pr_update_needed)
             && plans.iter().all(|plan| plan.existing_pr.is_some())
         {
-            self.plan_line("- no branch or PR metadata changes");
+            self.plan_line("no branch or PR metadata changes");
         }
 
         if self.verbose {

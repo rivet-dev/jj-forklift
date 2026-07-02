@@ -93,7 +93,7 @@ pub(crate) async fn fetch_get_branches(
     }
     let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
     if diagnostics.dry_run {
-        diagnostics.plan_line(&format!("- {}", display_command("jj", &arg_refs)));
+        diagnostics.plan_line(&format!("{}", display_command("jj", &arg_refs)));
         return Ok(());
     }
 
