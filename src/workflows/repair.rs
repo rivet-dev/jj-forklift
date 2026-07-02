@@ -550,13 +550,26 @@ pub(crate) async fn plan_stack_comment_repair(
     pr_numbers: Vec<u64>,
 ) -> Result<RepairPlan> {
     let mut seen = HashSet::new();
-    let mut open_prs = Vec::new();
-    let mut pruned_merged_prs = Vec::new();
-    for pr_number in pr_numbers {
-        if !seen.insert(pr_number) {
+    // The duplicate check is on the PR number alone, so it runs up front before
+    // any network call; the fetches then fan out concurrently, order preserved.
+    for pr_number in &pr_numbers {
+        if !seen.insert(*pr_number) {
             bail!("stack comment listed PR #{} more than once", pr_number);
         }
-        let pr = fetch_pr_by_number(runner, github, "repair", pr_number).await?;
+    }
+    let fetched = stream::iter(
+        pr_numbers
+            .iter()
+            .map(|pr_number| fetch_pr_by_number(runner, github, "repair", *pr_number)),
+    )
+    .buffered(NETWORK_CONCURRENCY)
+    .collect::<Vec<_>>()
+    .await;
+
+    let mut open_prs = Vec::new();
+    let mut pruned_merged_prs = Vec::new();
+    for pr in fetched {
+        let pr = pr?;
         validate_get_pr_metadata(github, &pr)?;
         if pr.state.eq_ignore_ascii_case("OPEN") {
             open_prs.push(pr);

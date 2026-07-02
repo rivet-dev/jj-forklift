@@ -723,9 +723,19 @@ pub(crate) async fn verify_prs_merged(
     let progress = diagnostics.progress_bar("Verifying", "merged PRs", total);
     let mut delay_ms = POLL_INITIAL_DELAY_MS;
     for attempt in 0..POLL_MAX_ATTEMPTS {
+        // Poll every still-pending PR concurrently; a single wave replaces one
+        // serial `gh` round-trip per PR on each attempt.
+        let merged = stream::iter(
+            pending
+                .iter()
+                .map(|&pr_number| pr_is_merged(runner, github, pr_number)),
+        )
+        .buffered(NETWORK_CONCURRENCY)
+        .collect::<Vec<_>>()
+        .await;
         let mut still_pending = Vec::new();
-        for &pr_number in &pending {
-            if !pr_is_merged(runner, github, pr_number).await.unwrap_or(false) {
+        for (&pr_number, is_merged) in pending.iter().zip(merged) {
+            if !is_merged.unwrap_or(false) {
                 still_pending.push(pr_number);
             }
         }
@@ -1075,14 +1085,21 @@ pub(crate) async fn validate_merge_frozen_dependencies(
         return Ok(());
     }
 
-    for dependency in &context.frozen_dependencies {
-        let pr = fetch_pr_for_merge(
+    // Fetch every frozen dependency's PR concurrently; the validation below runs
+    // in order and short-circuits on the first offending dependency.
+    let fetched = stream::iter(context.frozen_dependencies.iter().map(|dependency| {
+        fetch_pr_for_merge(
             runner,
             &context.github,
             &dependency.change.change_id,
             dependency.bookmark.pr_number,
         )
-        .await?;
+    }))
+    .buffered(NETWORK_CONCURRENCY)
+    .collect::<Vec<_>>()
+    .await;
+    for (dependency, pr) in context.frozen_dependencies.iter().zip(fetched) {
+        let pr = pr?;
         if pr.state.eq_ignore_ascii_case("OPEN") {
             bail!(
                 CliError::new(format!(
@@ -1284,17 +1301,23 @@ pub(crate) async fn settle_candidates_mergeability(
         if pending.is_empty() {
             break;
         }
-        let mut still_pending = Vec::new();
-        for &index in &pending {
-            let candidate = &mut candidates[index];
-            candidate.pr = match fetch_pr_for_merge(
+        // Re-fetch every pending candidate's PR concurrently, then apply the
+        // results sequentially (the mutation needs `&mut candidates`).
+        let fetched = stream::iter(pending.iter().map(|&index| {
+            let candidate = &candidates[index];
+            fetch_pr_for_merge(
                 runner,
                 github,
                 &candidate.change.change_id,
                 candidate.entry.pr_number,
             )
-            .await
-            {
+        }))
+        .buffered(NETWORK_CONCURRENCY)
+        .collect::<Vec<_>>()
+        .await;
+        let mut still_pending = Vec::new();
+        for (&index, pr) in pending.iter().zip(fetched) {
+            candidates[index].pr = match pr {
                 Ok(pr) => pr,
                 Err(error) => {
                     if let Some(progress) = progress {
@@ -1303,7 +1326,7 @@ pub(crate) async fn settle_candidates_mergeability(
                     return Err(error);
                 }
             };
-            if mergeability_unknown(&candidate.pr) {
+            if mergeability_unknown(&candidates[index].pr) {
                 still_pending.push(index);
             }
         }

@@ -161,9 +161,16 @@ pub(crate) async fn resolve_get_pr_changes(
     runner: &impl CommandRunner,
     prs: &[GhPr],
 ) -> Result<BTreeMap<u64, ResolvedChange>> {
+    // Resolve each fetched PR head into a jj change concurrently. These are
+    // independent read-only `jj log` lookups; the per-PR validation stays ordered.
+    let stacks = stream::iter(prs.iter().map(|pr| resolve_stack(runner, &pr.head_ref_oid)))
+        .buffered(NETWORK_CONCURRENCY)
+        .collect::<Vec<_>>()
+        .await;
+
     let mut changes = BTreeMap::new();
-    for pr in prs {
-        let stack = resolve_stack(runner, &pr.head_ref_oid).await.with_context(|| {
+    for (pr, stack) in prs.iter().zip(stacks) {
+        let stack = stack.with_context(|| {
             format!("resolve fetched PR #{} head {}", pr.number, pr.head_ref_oid)
         })?;
         let [change] = stack.as_slice() else {
