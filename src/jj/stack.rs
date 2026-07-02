@@ -44,7 +44,7 @@ pub(crate) struct StackResolution {
     pub(crate) frozen_dependencies: Vec<FrozenDependency>,
 }
 
-pub(crate) fn resolve_stack(
+pub(crate) async fn resolve_stack(
     runner: &impl CommandRunner,
     revset: &str,
 ) -> Result<Vec<ResolvedChange>> {
@@ -59,7 +59,7 @@ pub(crate) fn resolve_stack(
             "-T",
             STACK_LOG_TEMPLATE,
         ],
-    )?;
+    ).await?;
     if !output.success {
         bail!(
             "`{}` failed: {}",
@@ -79,27 +79,27 @@ pub(crate) fn resolve_stack(
         );
     }
 
-    parse_stack_log(runner, &output.stdout).context("parse jj stack log")
+    parse_stack_log(runner, &output.stdout).await.context("parse jj stack log")
 }
 
-pub(crate) fn resolve_stack_context(
+pub(crate) async fn resolve_stack_context(
     runner: &impl CommandRunner,
     revset: &str,
 ) -> Result<AppContext> {
-    resolve_single_rev(runner, "trunk()")?;
-    let frozen_bookmarks = frozen_bookmarks(runner)?;
-    let stack = resolve_stack(runner, revset)?;
-    validate_stack_shape(runner, &stack, revset)?;
-    let stack_resolution = resolve_stack_resolution(runner, stack, frozen_bookmarks)?;
-    let github = GitHubContext::resolve(runner)?;
+    resolve_single_rev(runner, "trunk()").await?;
+    let frozen_bookmarks = frozen_bookmarks(runner).await?;
+    let stack = resolve_stack(runner, revset).await?;
+    validate_stack_shape(runner, &stack, revset).await?;
+    let stack_resolution = resolve_stack_resolution(runner, stack, frozen_bookmarks).await?;
+    let github = GitHubContext::resolve(runner).await?;
 
     Ok(AppContext::new(github, stack_resolution))
 }
 
-pub(crate) fn resolve_single_rev(runner: &impl CommandRunner, rev: &str) -> Result<String> {
+pub(crate) async fn resolve_single_rev(runner: &impl CommandRunner, rev: &str) -> Result<String> {
     let template = "commit_id ++ \"\\n\"";
     let args = ["log", "--no-graph", "-r", rev, "-T", template];
-    let output = runner.run("jj", &args)?;
+    let output = runner.run("jj", &args).await?;
     if !output.success {
         bail!(
             "failed-command=`{}` error={}",
@@ -123,19 +123,22 @@ pub(crate) fn resolve_single_rev(runner: &impl CommandRunner, rev: &str) -> Resu
     }
 }
 
-pub(crate) fn parse_stack_log(
+pub(crate) async fn parse_stack_log(
     runner: &impl CommandRunner,
     stdout: &str,
 ) -> Result<Vec<ResolvedChange>> {
-    stdout
+    let mut changes = Vec::new();
+    for record in stdout
         .split(STACK_RECORD_SEPARATOR)
         .filter(|record| !record.is_empty())
-        .map(|record| parse_stack_record(runner, record))
-        .collect()
+    {
+        changes.push(parse_stack_record(runner, record).await?);
+    }
+    Ok(changes)
 }
 
 #[tracing::instrument(level = "trace", skip_all)]
-pub(crate) fn parse_stack_record(
+pub(crate) async fn parse_stack_record(
     runner: &impl CommandRunner,
     record: &str,
 ) -> Result<ResolvedChange> {
@@ -152,7 +155,7 @@ pub(crate) fn parse_stack_record(
     let empty = serde_json::from_str::<bool>(fields[5]).context("parse empty status")?;
     let conflict = serde_json::from_str::<bool>(fields[6]).context("parse conflict status")?;
     let divergent = serde_json::from_str::<bool>(fields[7]).context("parse divergent status")?;
-    let tree_id = resolve_tree_id(runner, &commit_id)?;
+    let tree_id = resolve_tree_id(runner, &commit_id).await?;
 
     Ok(ResolvedChange {
         change_id,
@@ -182,8 +185,9 @@ pub(crate) fn description_body(description: &str, title: &str) -> String {
 }
 
 #[tracing::instrument(level = "trace", skip_all, fields(commit = %commit_id))]
-pub(crate) fn resolve_tree_id(runner: &impl CommandRunner, commit_id: &str) -> Result<String> {
+pub(crate) async fn resolve_tree_id(runner: &impl CommandRunner, commit_id: &str) -> Result<String> {
     git_run_required(runner, &["show", "-s", "--format=%T", commit_id])
+        .await
         .with_context(|| format!("resolve tree id for commit {commit_id}"))
 }
 
@@ -212,7 +216,7 @@ pub(crate) fn warn_divergent_changes(stack: &[ResolvedChange]) {
 }
 
 #[tracing::instrument(skip_all, fields(revset = %revset))]
-pub(crate) fn validate_stack_shape(
+pub(crate) async fn validate_stack_shape(
     runner: &impl CommandRunner,
     stack: &[ResolvedChange],
     revset: &str,
@@ -272,7 +276,7 @@ pub(crate) fn validate_stack_shape(
         // middle of the stack: the revset's `~empty()` drops it, severing the
         // parent link so the change above it looks like a second root. Name the
         // empty change instead of the misleading "multiple roots".
-        let bridges = empty_changes_bridging_roots(runner, stack, &selected_commits);
+        let bridges = empty_changes_bridging_roots(runner, stack, &selected_commits).await;
         if !bridges.is_empty() {
             let noun = if bridges.len() == 1 {
                 "change"
@@ -358,7 +362,7 @@ pub(crate) fn validate_stack_shape(
 /// (e.g. a leftover `jj new` between trunk and the root) and the frozen-dep
 /// chain are correctly ignored: any *non-empty* ancestor of the root that is
 /// not in `::trunk()` and not a frozen dependency is the dangerous case.
-pub(crate) fn validate_owned_base(
+pub(crate) async fn validate_owned_base(
     runner: &impl CommandRunner,
     resolution: &StackResolution,
 ) -> Result<()> {
@@ -385,6 +389,7 @@ pub(crate) fn validate_owned_base(
     );
 
     let dangerous = list_commit_ids(runner, &revset)
+        .await
         .context("inspect ancestry below owned stack root for un-merged commits")?;
     if let Some(parent) = dangerous.first() {
         // Keep the diagnosis in the message (not `.reason()`): when this bubbles
@@ -425,12 +430,12 @@ pub(crate) fn selected_parent<'a>(
 /// change (proving the empty is wedged *between* real changes, not trailing
 /// below the stack). Best-effort: any jj lookup failure just falls back to the
 /// generic "multiple roots" error.
-fn empty_changes_bridging_roots(
+async fn empty_changes_bridging_roots(
     runner: &impl CommandRunner,
     stack: &[ResolvedChange],
     selected_commits: &HashSet<&str>,
 ) -> Vec<ResolvedChange> {
-    let trunk = resolve_single_rev(runner, "trunk()").ok();
+    let trunk = resolve_single_rev(runner, "trunk()").await.ok();
     let mut bridges = Vec::new();
     let mut reported = HashSet::new();
     let mut visited = HashSet::new();
@@ -459,6 +464,7 @@ fn empty_changes_bridging_roots(
                     break;
                 }
                 let Some(resolved) = resolve_stack(runner, &current)
+                    .await
                     .ok()
                     .and_then(|changes| changes.into_iter().next())
                 else {

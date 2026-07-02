@@ -10,10 +10,11 @@ pub(super) struct AppConfig {
 
 impl AppConfig {
     #[tracing::instrument(skip_all)]
-    pub(super) fn resolve(runner: &impl CommandRunner) -> Result<Self> {
-        let remote = resolve_string_config(runner, "remote", DEFAULT_REMOTE);
-        let trunk = resolve_string_config(runner, "trunk", DEFAULT_TRUNK);
-        let branch_prefix = resolve_string_config(runner, "branch-prefix", DEFAULT_BRANCH_PREFIX);
+    pub(super) async fn resolve(runner: &impl CommandRunner) -> Result<Self> {
+        let remote = resolve_string_config(runner, "remote", DEFAULT_REMOTE).await;
+        let trunk = resolve_string_config(runner, "trunk", DEFAULT_TRUNK).await;
+        let branch_prefix =
+            resolve_string_config(runner, "branch-prefix", DEFAULT_BRANCH_PREFIX).await;
         Ok(Self {
             remote: validate_ref_component("remote", remote)?,
             trunk: validate_ref_component("trunk", trunk)?,
@@ -21,21 +22,26 @@ impl AppConfig {
                 runner,
                 "require-approval",
                 DEFAULT_REQUIRE_APPROVAL,
-            )?,
+            )
+            .await?,
             branch_prefix: validate_ref_component("branch-prefix", branch_prefix)?,
         })
     }
 }
 
 #[tracing::instrument(skip_all)]
-pub(super) fn resolve_string_config(
+pub(super) async fn resolve_string_config(
     runner: &impl CommandRunner,
     name: &str,
     default: &str,
 ) -> String {
-    config_value(runner, "jj", name)
-        .or_else(|| config_value(runner, "git", name))
-        .unwrap_or_else(|| default.to_owned())
+    if let Some(value) = config_value(runner, "jj", name).await {
+        return value;
+    }
+    if let Some(value) = config_value(runner, "git", name).await {
+        return value;
+    }
+    default.to_owned()
 }
 
 /// Validate a configured ref component (remote/trunk/branch-prefix) before it is
@@ -65,19 +71,23 @@ pub(super) fn validate_ref_component(name: &str, value: String) -> Result<String
 }
 
 #[tracing::instrument(skip_all)]
-pub(super) fn resolve_bool_config(
+pub(super) async fn resolve_bool_config(
     runner: &impl CommandRunner,
     name: &str,
     default: bool,
 ) -> Result<bool> {
-    match config_value(runner, "jj", name).or_else(|| config_value(runner, "git", name)) {
+    let value = match config_value(runner, "jj", name).await {
+        Some(value) => Some(value),
+        None => config_value(runner, "git", name).await,
+    };
+    match value {
         Some(value) => parse_bool_config(name, &value),
         None => Ok(default),
     }
 }
 
 #[tracing::instrument(skip_all)]
-pub(super) fn config_value(
+pub(super) async fn config_value(
     runner: &impl CommandRunner,
     program: &str,
     name: &str,
@@ -90,8 +100,8 @@ pub(super) fn config_value(
     };
 
     let output = match program {
-        "git" => git_run(runner, &args).ok()?,
-        _ => runner.run(program, &args).ok()?,
+        "git" => git_run(runner, &args).await.ok()?,
+        _ => runner.run(program, &args).await.ok()?,
     };
     if !output.success {
         return None;
@@ -121,8 +131,8 @@ pub(super) struct StartupConfigAction {
 }
 
 #[tracing::instrument(skip_all)]
-pub(super) fn ensure_jj_repo(runner: &impl CommandRunner, cwd: &str) -> Result<()> {
-    let output = runner.run("jj", &["root"])?;
+pub(super) async fn ensure_jj_repo(runner: &impl CommandRunner, cwd: &str) -> Result<()> {
+    let output = runner.run("jj", &["root"]).await?;
     if output.success {
         return Ok(());
     }
@@ -135,13 +145,13 @@ pub(super) fn ensure_jj_repo(runner: &impl CommandRunner, cwd: &str) -> Result<(
 }
 
 #[tracing::instrument(skip_all)]
-pub(super) fn ensure_startup_config(
+pub(super) async fn ensure_startup_config(
     runner: &impl CommandRunner,
     diagnostics: Diagnostics,
 ) -> Result<()> {
-    let frozen = jj_config_optional(runner, JJ_CONFIG_FROZEN_ALIAS_KEY)?;
-    let immutable = jj_config_required(runner, JJ_CONFIG_IMMUTABLE_ALIAS_KEY)?;
-    let base = jj_config_optional(runner, JJ_CONFIG_BASE_IMMUTABLE_ALIAS_KEY)?;
+    let frozen = jj_config_optional(runner, JJ_CONFIG_FROZEN_ALIAS_KEY).await?;
+    let immutable = jj_config_required(runner, JJ_CONFIG_IMMUTABLE_ALIAS_KEY).await?;
+    let base = jj_config_optional(runner, JJ_CONFIG_BASE_IMMUTABLE_ALIAS_KEY).await?;
     let actions = plan_startup_config(frozen.as_deref(), &immutable, base.as_deref())?;
 
     if actions.is_empty() {
@@ -159,7 +169,7 @@ pub(super) fn ensure_startup_config(
     }
 
     for action in actions {
-        set_jj_repo_config(runner, action.key, &action.value, diagnostics)?;
+        set_jj_repo_config(runner, action.key, &action.value, diagnostics).await?;
     }
 
     Ok(())
@@ -221,9 +231,9 @@ pub(super) fn plan_startup_config(
 }
 
 #[tracing::instrument(skip_all)]
-pub(super) fn jj_config_required(runner: &impl CommandRunner, key: &str) -> Result<String> {
+pub(super) async fn jj_config_required(runner: &impl CommandRunner, key: &str) -> Result<String> {
     let args = ["config", "get", key];
-    let output = runner.run("jj", &args)?;
+    let output = runner.run("jj", &args).await?;
     if !output.success {
         bail!(
             "failed-command=`{}` error={} safe-next-command=`forklift submit --dry-run`",
@@ -236,9 +246,12 @@ pub(super) fn jj_config_required(runner: &impl CommandRunner, key: &str) -> Resu
 }
 
 #[tracing::instrument(skip_all)]
-pub(super) fn jj_config_optional(runner: &impl CommandRunner, key: &str) -> Result<Option<String>> {
+pub(super) async fn jj_config_optional(
+    runner: &impl CommandRunner,
+    key: &str,
+) -> Result<Option<String>> {
     let args = ["config", "get", key];
-    let output = runner.run("jj", &args)?;
+    let output = runner.run("jj", &args).await?;
     if !output.success {
         return Ok(None);
     }
@@ -252,7 +265,7 @@ pub(super) fn jj_config_optional(runner: &impl CommandRunner, key: &str) -> Resu
 }
 
 #[tracing::instrument(skip_all)]
-pub(super) fn set_jj_repo_config(
+pub(super) async fn set_jj_repo_config(
     runner: &impl CommandRunner,
     key: &str,
     value: &str,
@@ -261,7 +274,7 @@ pub(super) fn set_jj_repo_config(
     let toml_value = serde_json::to_string(value).context("quote jj config value")?;
     let args = ["config", "set", "--repo", key, toml_value.as_str()];
     diagnostics.command("jj", &args);
-    let output = runner.run("jj", &args)?;
+    let output = runner.run("jj", &args).await?;
     if !output.success {
         bail!(
             "failed-command=`{}` error={} safe-next-command=`forklift submit --dry-run`",

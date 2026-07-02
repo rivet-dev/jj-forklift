@@ -1,7 +1,7 @@
 use super::super::cli::*;
 use super::super::*;
 
-pub(crate) fn run(
+pub(crate) async fn run(
     runner: &impl CommandRunner,
     config: &AppConfig,
     options: TrackOptions,
@@ -9,7 +9,7 @@ pub(crate) fn run(
     _verbose: bool,
     dry_run: bool,
 ) -> Result<()> {
-    let outcome = track_target(runner, config, &options.target, diagnostics)?;
+    let outcome = track_target(runner, config, &options.target, diagnostics).await?;
 
     let prefix = if dry_run { "track (dry run) — would adopt" } else { "track — adopted" };
     let summary = match outcome.pr_number {

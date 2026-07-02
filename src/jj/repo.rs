@@ -1,8 +1,8 @@
 use super::super::*;
 
-pub(crate) fn resolve_current_jj_repo_dir(runner: &impl CommandRunner) -> Result<PathBuf> {
+pub(crate) async fn resolve_current_jj_repo_dir(runner: &impl CommandRunner) -> Result<PathBuf> {
     let workspace_root =
-        run_required(runner, "jj", &["root"]).context("resolve jj workspace root")?;
+        run_required(runner, "jj", &["root"]).await.context("resolve jj workspace root")?;
     resolve_jj_repo_dir(Path::new(&workspace_root))
 }
 

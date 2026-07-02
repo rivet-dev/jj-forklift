@@ -75,7 +75,7 @@ pub(crate) fn find_unused_head_branch(base: &str, used_branches: &HashSet<String
     unreachable!("unbounded branch suffix search should find a candidate")
 }
 
-pub(crate) fn fetch_get_branches(
+pub(crate) async fn fetch_get_branches(
     runner: &impl CommandRunner,
     config: &AppConfig,
     prs: &[GhPr],
@@ -98,7 +98,7 @@ pub(crate) fn fetch_get_branches(
     }
 
     diagnostics.command("jj", &arg_refs);
-    let output = runner.run("jj", &arg_refs)?;
+    let output = runner.run("jj", &arg_refs).await?;
     if !output.success {
         let branches = prs
             .iter()

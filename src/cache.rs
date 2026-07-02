@@ -53,12 +53,12 @@ pub(super) struct CacheStore {
 
 impl CacheStore {
     #[tracing::instrument(skip_all, fields(phase = phase))]
-    pub(super) fn load_current_best_effort(
+    pub(super) async fn load_current_best_effort(
         runner: &impl CommandRunner,
         diagnostics: Diagnostics,
         phase: &str,
     ) -> Result<Self> {
-        let repo_dir = resolve_current_jj_repo_dir(runner)?;
+        let repo_dir = resolve_current_jj_repo_dir(runner).await?;
         let path = repo_dir.join(CONFIG_PREFIX).join("cache.sqlite");
         match Self::load(path.clone()) {
             Ok(store) => Ok(store),

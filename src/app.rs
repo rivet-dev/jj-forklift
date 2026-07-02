@@ -5,7 +5,6 @@ use std::fmt::{self, Display};
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process;
-use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use std::io::{self, IsTerminal, Write};
@@ -160,15 +159,29 @@ use workflows::*;
 
 pub fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
+    // Build the async runtime explicitly rather than via `#[tokio::main]` so the
+    // process entrypoint stays a plain `fn main() -> ExitCode`. A multi-thread
+    // runtime lets the concurrent subprocess futures (`gh`/`git`/`jj`) make
+    // progress in parallel.
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("failed to start async runtime: {error}");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
     // `run` prints a human-readable failure itself; main only sets the exit code
     // so anyhow doesn't also dump the raw structured error to the terminal.
-    match run(cli, &SystemRunner) {
+    match runtime.block_on(run(cli, &SystemRunner)) {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(_) => std::process::ExitCode::FAILURE,
     }
 }
 
-fn run(cli: Cli, runner: &impl CommandRunner) -> Result<()> {
+async fn run(cli: Cli, runner: &impl CommandRunner) -> Result<()> {
     let command_name = cli.command.name();
     let trace_log = init_tracing(command_name);
     init_ui(std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none());
@@ -208,7 +221,7 @@ fn run(cli: Cli, runner: &impl CommandRunner) -> Result<()> {
     // A jj passthrough surfaces jj's own stderr; don't layer forklift's
     // diagnostic block on top when the forwarded command exits non-zero.
     let is_passthrough = matches!(cli.command, Commands::External(_));
-    let result = run_command(cli, runner, &cwd);
+    let result = run_command(cli, runner, &cwd).await;
     match &result {
         Ok(()) => tracing::debug!(command = command_name, "command complete"),
         Err(error) => {
@@ -222,23 +235,27 @@ fn run(cli: Cli, runner: &impl CommandRunner) -> Result<()> {
     result
 }
 
-fn run_command(cli: Cli, runner: &impl CommandRunner, cwd: &str) -> Result<()> {
+async fn run_command(cli: Cli, runner: &impl CommandRunner, cwd: &str) -> Result<()> {
     // Unknown subcommands are forwarded straight to `jj`, like `gt` does for
     // `git`. Skip forklift's config/startup preflight so the passthrough behaves
     // exactly as if `jj` were invoked directly (jj prints its own errors).
     if let Commands::External(args) = &cli.command {
         let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
-        return runner.run_interactive("jj", &borrowed);
+        return runner.run_interactive("jj", &borrowed).await;
     }
 
-    ensure_jj_repo(runner, cwd).map_err(|error| phase_error("preflight", "jj repo", error))?;
+    ensure_jj_repo(runner, cwd)
+        .await
+        .map_err(|error| phase_error("preflight", "jj repo", error))?;
     let config = AppConfig::resolve(runner)
+        .await
         .map_err(|error| phase_error("resolve-config", "configuration", error))?;
     let diagnostics = Diagnostics {
         verbose: cli.verbose,
         dry_run: cli.dry_run,
     };
     ensure_startup_config(runner, diagnostics)
+        .await
         .map_err(|error| phase_error("startup-config", "jj config", error))?;
 
     if cli.verbose {
@@ -256,7 +273,8 @@ fn run_command(cli: Cli, runner: &impl CommandRunner, cwd: &str) -> Result<()> {
             diagnostics,
             cli.verbose,
             cli.dry_run,
-        )?,
+        )
+        .await?,
         Commands::Sync(options) => commands::sync::run(
             runner,
             &config,
@@ -264,7 +282,8 @@ fn run_command(cli: Cli, runner: &impl CommandRunner, cwd: &str) -> Result<()> {
             diagnostics,
             cli.verbose,
             cli.dry_run,
-        )?,
+        )
+        .await?,
         Commands::Merge(options) => commands::merge::run(
             runner,
             &config,
@@ -272,7 +291,8 @@ fn run_command(cli: Cli, runner: &impl CommandRunner, cwd: &str) -> Result<()> {
             diagnostics,
             cli.verbose,
             cli.dry_run,
-        )?,
+        )
+        .await?,
         Commands::Get(options) => commands::get::run(
             runner,
             &config,
@@ -280,7 +300,8 @@ fn run_command(cli: Cli, runner: &impl CommandRunner, cwd: &str) -> Result<()> {
             diagnostics,
             cli.verbose,
             cli.dry_run,
-        )?,
+        )
+        .await?,
         Commands::Repair(options) => commands::repair::run(
             runner,
             &config,
@@ -288,7 +309,8 @@ fn run_command(cli: Cli, runner: &impl CommandRunner, cwd: &str) -> Result<()> {
             diagnostics,
             cli.verbose,
             cli.dry_run,
-        )?,
+        )
+        .await?,
         Commands::Unfreeze(options) => commands::unfreeze::run(
             runner,
             &config,
@@ -296,7 +318,8 @@ fn run_command(cli: Cli, runner: &impl CommandRunner, cwd: &str) -> Result<()> {
             diagnostics,
             cli.verbose,
             cli.dry_run,
-        )?,
+        )
+        .await?,
         Commands::Status(options) => commands::status::run(
             runner,
             &config,
@@ -304,7 +327,8 @@ fn run_command(cli: Cli, runner: &impl CommandRunner, cwd: &str) -> Result<()> {
             diagnostics,
             cli.verbose,
             cli.dry_run,
-        )?,
+        )
+        .await?,
         Commands::Track(options) => commands::track::run(
             runner,
             &config,
@@ -312,7 +336,8 @@ fn run_command(cli: Cli, runner: &impl CommandRunner, cwd: &str) -> Result<()> {
             diagnostics,
             cli.verbose,
             cli.dry_run,
-        )?,
+        )
+        .await?,
         Commands::Pr(options) => commands::pr::run(
             runner,
             &config,
@@ -320,7 +345,8 @@ fn run_command(cli: Cli, runner: &impl CommandRunner, cwd: &str) -> Result<()> {
             diagnostics,
             cli.verbose,
             cli.dry_run,
-        )?,
+        )
+        .await?,
         Commands::Ui(options) => commands::ui::run(
             runner,
             &config,
@@ -328,7 +354,8 @@ fn run_command(cli: Cli, runner: &impl CommandRunner, cwd: &str) -> Result<()> {
             diagnostics,
             cli.verbose,
             cli.dry_run,
-        )?,
+        )
+        .await?,
         Commands::External(_) => unreachable!("external subcommands are handled before dispatch"),
     }
 

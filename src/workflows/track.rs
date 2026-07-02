@@ -21,7 +21,7 @@ pub(crate) struct TrackOutcome {
 /// back to adopting the branch locally so it is still tracked; a later submit
 /// opens the PR.
 #[tracing::instrument(skip_all, fields(target = target))]
-pub(crate) fn track_target(
+pub(crate) async fn track_target(
     runner: &impl CommandRunner,
     config: &AppConfig,
     target: &str,
@@ -29,18 +29,19 @@ pub(crate) fn track_target(
 ) -> Result<TrackOutcome> {
     diagnostics.phase("resolve-github");
     let mut github = GitHubContext::resolve(runner)
+        .await
         .map_err(|error| phase_error("resolve-github", "github", error))?;
     let parsed = parse_get_target(target, &github.repo)?;
     github.repo = parsed.repo().to_owned();
 
     diagnostics.phase("resolve-pr");
-    match resolve_target_pr(runner, &github, parsed.clone(), "track") {
-        Ok(pr) => adopt_open_pr(runner, config, &github, pr, diagnostics),
+    match resolve_target_pr(runner, &github, parsed.clone(), "track").await {
+        Ok(pr) => adopt_open_pr(runner, config, &github, pr, diagnostics).await,
         // A PR number that doesn't resolve is a hard error; a branch/change that
         // has no open PR falls back to local-only tracking.
         Err(pr_error) => match parsed {
             GetTarget::BranchOrChange { value, .. } => {
-                track_branch_locally(runner, config, &value, diagnostics)
+                track_branch_locally(runner, config, &value, diagnostics).await
             }
             GetTarget::PullRequest { .. } => Err(phase_error("resolve-pr", target, pr_error)),
         },
@@ -49,7 +50,7 @@ pub(crate) fn track_target(
 
 /// Bind an open PR: set its head bookmark on the PR head commit, track the
 /// remote, and record the cache row so submit updates this PR.
-fn adopt_open_pr(
+async fn adopt_open_pr(
     runner: &impl CommandRunner,
     config: &AppConfig,
     github: &GitHubContext,
@@ -79,7 +80,7 @@ fn adopt_open_pr(
     }
 
     diagnostics.phase("resolve-commit");
-    let commit_id = resolve_single_rev(runner, &pr.head_ref_oid).map_err(|error| {
+    let commit_id = resolve_single_rev(runner, &pr.head_ref_oid).await.map_err(|error| {
         phase_error(
             "resolve-commit",
             &head_branch,
@@ -91,10 +92,12 @@ fn adopt_open_pr(
         )
     })?;
     let change_id = jj_ref_change_id(runner, &commit_id)
+        .await
         .map_err(|error| phase_error("resolve-commit", &head_branch, error))?;
 
     diagnostics.phase("set-bookmark");
     set_local_bookmark(runner, &head_branch, &commit_id, diagnostics)
+        .await
         .map_err(|error| phase_error("set-bookmark", &head_branch, error))?;
 
     // Ensure the remote bookmark is tracked so submit's bookmark-state check
@@ -102,15 +105,17 @@ fn adopt_open_pr(
     // tracks it once asked.
     diagnostics.phase("track-remote");
     let remote_status = remote_bookmark_status(runner, config, &head_branch)
+        .await
         .map_err(|error| phase_error("track-remote", &head_branch, error))?;
     if !remote_status.tracked {
         track_remote_bookmark(runner, config, &head_branch, diagnostics)
+            .await
             .map_err(|error| phase_error("track-remote", &head_branch, error))?;
     }
 
     // Preserve a previously recorded stack-comment id if we are re-tracking.
     diagnostics.phase("save-cache");
-    let mut store = CacheStore::load_current_best_effort(runner, diagnostics, "track")?;
+    let mut store = CacheStore::load_current_best_effort(runner, diagnostics, "track").await?;
     let stack_comment_id = store
         .get_pr(&github.repo, &change_id)
         .and_then(|entry| entry.stack_comment_id.clone());
@@ -121,7 +126,7 @@ fn adopt_open_pr(
             .map_err(|error| phase_error("save-cache", &head_branch, error))?;
     }
 
-    let outside_current_stack = !commit_is_in_current_stack(runner, &commit_id)?;
+    let outside_current_stack = !commit_is_in_current_stack(runner, &commit_id).await?;
 
     Ok(TrackOutcome {
         pr_number: Some(pr_number),
@@ -136,7 +141,7 @@ fn adopt_open_pr(
 /// commit and track the remote if one exists. No cache row is written (there is
 /// no PR yet); a later `forklift submit` opens the PR. The target must name an
 /// existing local or remote branch — a bare change id has no branch to track.
-fn track_branch_locally(
+async fn track_branch_locally(
     runner: &impl CommandRunner,
     config: &AppConfig,
     branch: &str,
@@ -147,11 +152,13 @@ fn track_branch_locally(
     }
 
     diagnostics.phase("resolve-branch");
-    let commit_id = if bookmark_exists(runner, branch)? {
+    let commit_id = if bookmark_exists(runner, branch).await? {
         jj_ref_commit_id(runner, branch)
+            .await
             .map_err(|error| phase_error("resolve-branch", branch, error))?
-    } else if remote_bookmark_status(runner, config, branch).is_ok() {
+    } else if remote_bookmark_status(runner, config, branch).await.is_ok() {
         jj_ref_commit_id(runner, &format!("{branch}@{}", config.remote))
+            .await
             .map_err(|error| phase_error("resolve-branch", branch, error))?
     } else {
         bail!(
@@ -164,18 +171,21 @@ fn track_branch_locally(
         );
     };
     let change_id = jj_ref_change_id(runner, &commit_id)
+        .await
         .map_err(|error| phase_error("resolve-branch", branch, error))?;
 
     diagnostics.phase("set-bookmark");
     set_local_bookmark(runner, branch, &commit_id, diagnostics)
+        .await
         .map_err(|error| phase_error("set-bookmark", branch, error))?;
 
     // Track the remote branch if one exists; a purely local branch has nothing
     // to track yet and submit will push it.
     diagnostics.phase("track-remote");
-    if let Ok(status) = remote_bookmark_status(runner, config, branch) {
+    if let Ok(status) = remote_bookmark_status(runner, config, branch).await {
         if !status.tracked && !diagnostics.dry_run {
             track_remote_bookmark(runner, config, branch, diagnostics)
+                .await
                 .map_err(|error| phase_error("track-remote", branch, error))?;
         }
     }
@@ -183,7 +193,7 @@ fn track_branch_locally(
     // No cache row is written: the bookmark we just set on the commit is the
     // durable record that submit reads. The cache stays a best-effort PR-metadata
     // store, never a correctness gate.
-    let outside_current_stack = !commit_is_in_current_stack(runner, &commit_id)?;
+    let outside_current_stack = !commit_is_in_current_stack(runner, &commit_id).await?;
 
     Ok(TrackOutcome {
         pr_number: None,
@@ -195,10 +205,10 @@ fn track_branch_locally(
 }
 
 /// True when a local bookmark named `name` exists (including a conflicted one).
-fn bookmark_exists(runner: &impl CommandRunner, name: &str) -> Result<bool> {
+async fn bookmark_exists(runner: &impl CommandRunner, name: &str) -> Result<bool> {
     let revset = format!("bookmarks(exact:'{name}')");
     let args = ["log", "--no-graph", "-r", &revset, "-T", "\"x\\n\""];
-    let output = runner.run("jj", &args)?;
+    let output = runner.run("jj", &args).await?;
     if !output.success {
         return Ok(false);
     }
@@ -208,7 +218,7 @@ fn bookmark_exists(runner: &impl CommandRunner, name: &str) -> Result<bool> {
 /// Point a local bookmark at `commit_id`, creating it or moving it if it already
 /// exists elsewhere (`--allow-backwards` covers a move toward an ancestor).
 #[tracing::instrument(skip_all, fields(bookmark = %bookmark))]
-fn set_local_bookmark(
+async fn set_local_bookmark(
     runner: &impl CommandRunner,
     bookmark: &str,
     commit_id: &str,
@@ -227,7 +237,7 @@ fn set_local_bookmark(
         return Ok(());
     }
     diagnostics.command("jj", &args);
-    let output = runner.run("jj", &args)?;
+    let output = runner.run("jj", &args).await?;
     if !output.success {
         bail!(
             "failed-command=`{}` error={}",
@@ -239,10 +249,10 @@ fn set_local_bookmark(
 }
 
 /// True when `commit_id` is part of the current owned stack (`trunk()..@`).
-fn commit_is_in_current_stack(runner: &impl CommandRunner, commit_id: &str) -> Result<bool> {
+async fn commit_is_in_current_stack(runner: &impl CommandRunner, commit_id: &str) -> Result<bool> {
     let revset = format!("({commit_id}) & (trunk()..@)");
     let args = ["log", "--no-graph", "-r", &revset, "-T", "commit_id ++ \"\\n\""];
-    let output = runner.run("jj", &args)?;
+    let output = runner.run("jj", &args).await?;
     if !output.success {
         bail!(
             "failed-command=`{}` error={}",

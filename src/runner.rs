@@ -7,11 +7,15 @@ pub(super) struct CommandOutput {
     pub(super) stderr: String,
 }
 
+// The returned futures are only ever driven inline (via `join_all` /
+// `buffer_unordered`), never `tokio::spawn`ed across threads, so we do not need
+// the `Send` bound the `async_fn_in_trait` lint warns about.
+#[allow(async_fn_in_trait)]
 pub(super) trait CommandRunner {
-    fn run(&self, program: &str, args: &[&str]) -> Result<CommandOutput>;
+    async fn run(&self, program: &str, args: &[&str]) -> Result<CommandOutput>;
 
-    fn run_interactive(&self, program: &str, args: &[&str]) -> Result<()> {
-        let output = self.run(program, args)?;
+    async fn run_interactive(&self, program: &str, args: &[&str]) -> Result<()> {
+        let output = self.run(program, args).await?;
         print!("{}", output.stdout);
         eprint!("{}", output.stderr);
         if !output.success {
@@ -24,8 +28,8 @@ pub(super) trait CommandRunner {
     /// directory. Default impl ignores `cwd` and delegates to `run`, which is
     /// fine for test fakes that don't care about which directory they're
     /// invoked from.
-    fn run_in_dir(&self, program: &str, args: &[&str], _cwd: &Path) -> Result<CommandOutput> {
-        self.run(program, args)
+    async fn run_in_dir(&self, program: &str, args: &[&str], _cwd: &Path) -> Result<CommandOutput> {
+        self.run(program, args).await
     }
 }
 
@@ -33,10 +37,11 @@ pub(super) struct SystemRunner;
 
 impl CommandRunner for SystemRunner {
     #[tracing::instrument(skip_all)]
-    fn run(&self, program: &str, args: &[&str]) -> Result<CommandOutput> {
-        let output = Command::new(program)
+    async fn run(&self, program: &str, args: &[&str]) -> Result<CommandOutput> {
+        let output = tokio::process::Command::new(program)
             .args(args)
             .output()
+            .await
             .with_context(|| format!("run `{}`", display_command(program, args)))?;
 
         Ok(CommandOutput {
@@ -47,10 +52,11 @@ impl CommandRunner for SystemRunner {
     }
 
     #[tracing::instrument(skip_all)]
-    fn run_interactive(&self, program: &str, args: &[&str]) -> Result<()> {
-        let status = Command::new(program)
+    async fn run_interactive(&self, program: &str, args: &[&str]) -> Result<()> {
+        let status = tokio::process::Command::new(program)
             .args(args)
             .status()
+            .await
             .with_context(|| format!("run `{}`", display_command(program, args)))?;
         if !status.success() {
             bail!(
@@ -62,11 +68,12 @@ impl CommandRunner for SystemRunner {
     }
 
     #[tracing::instrument(skip_all)]
-    fn run_in_dir(&self, program: &str, args: &[&str], cwd: &Path) -> Result<CommandOutput> {
-        let output = Command::new(program)
+    async fn run_in_dir(&self, program: &str, args: &[&str], cwd: &Path) -> Result<CommandOutput> {
+        let output = tokio::process::Command::new(program)
             .args(args)
             .current_dir(cwd)
             .output()
+            .await
             .with_context(|| format!("run `{}`", display_command(program, args)))?;
 
         Ok(CommandOutput {
@@ -78,12 +85,12 @@ impl CommandRunner for SystemRunner {
 }
 
 #[tracing::instrument(skip_all)]
-pub(super) fn run_required(
+pub(super) async fn run_required(
     runner: &impl CommandRunner,
     program: &str,
     args: &[&str],
 ) -> Result<String> {
-    let output = runner.run(program, args)?;
+    let output = runner.run(program, args).await?;
     if !output.success {
         bail!(
             "`{}` failed: {}",
@@ -107,8 +114,8 @@ pub(super) fn run_required(
 /// `<primary>/.jj/repo`, so the primary workspace dir is two `parent()` calls
 /// up from there.
 #[tracing::instrument(level = "trace", skip_all)]
-pub(super) fn git_workspace_root(runner: &impl CommandRunner) -> Result<PathBuf> {
-    let repo_dir = resolve_current_jj_repo_dir(runner)?;
+pub(super) async fn git_workspace_root(runner: &impl CommandRunner) -> Result<PathBuf> {
+    let repo_dir = resolve_current_jj_repo_dir(runner).await?;
     repo_dir
         .parent()
         .and_then(Path::parent)
@@ -124,14 +131,14 @@ pub(super) fn git_workspace_root(runner: &impl CommandRunner) -> Result<PathBuf>
 /// Run `git` against the backing colocated workspace, regardless of which jj
 /// workspace the user invoked us from. Secondary jj workspaces are not git
 /// worktrees, so there is exactly one `.git` to talk to — the primary's.
-pub(super) fn git_run(runner: &impl CommandRunner, args: &[&str]) -> Result<CommandOutput> {
-    let root = git_workspace_root(runner)?;
-    runner.run_in_dir("git", args, &root)
+pub(super) async fn git_run(runner: &impl CommandRunner, args: &[&str]) -> Result<CommandOutput> {
+    let root = git_workspace_root(runner).await?;
+    runner.run_in_dir("git", args, &root).await
 }
 
 /// `run_required` for git, targeting the backing colocated workspace.
-pub(super) fn git_run_required(runner: &impl CommandRunner, args: &[&str]) -> Result<String> {
-    let output = git_run(runner, args)?;
+pub(super) async fn git_run_required(runner: &impl CommandRunner, args: &[&str]) -> Result<String> {
+    let output = git_run(runner, args).await?;
     if !output.success {
         bail!(
             "`{}` failed: {}",
@@ -150,14 +157,14 @@ pub(super) fn git_run_required(runner: &impl CommandRunner, args: &[&str]) -> Re
 /// commands without an explicit `--repo` auto-detect the repo from the git
 /// remote in the cwd; in a secondary jj workspace there is no `.git`, so we
 /// must point gh at the primary.
-pub(super) fn gh_run(runner: &impl CommandRunner, args: &[&str]) -> Result<CommandOutput> {
-    let root = git_workspace_root(runner)?;
-    runner.run_in_dir("gh", args, &root)
+pub(super) async fn gh_run(runner: &impl CommandRunner, args: &[&str]) -> Result<CommandOutput> {
+    let root = git_workspace_root(runner).await?;
+    runner.run_in_dir("gh", args, &root).await
 }
 
 /// `run_required` for gh, targeting the backing colocated workspace.
-pub(super) fn gh_run_required(runner: &impl CommandRunner, args: &[&str]) -> Result<String> {
-    let output = gh_run(runner, args)?;
+pub(super) async fn gh_run_required(runner: &impl CommandRunner, args: &[&str]) -> Result<String> {
+    let output = gh_run(runner, args).await?;
     if !output.success {
         bail!(
             "`{}` failed: {}",
