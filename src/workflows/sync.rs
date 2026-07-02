@@ -726,12 +726,7 @@ pub(crate) async fn fetch_remote(
     config: &AppConfig,
     diagnostics: Diagnostics,
 ) -> Result<()> {
-    let mut args = vec!["git".to_owned(), "fetch".to_owned()];
-    append_fetch_branch_flags(&mut args, runner, config).await?;
-    args.push("--remote".to_owned());
-    args.push(config.remote.clone());
-    let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
-    run_fetch_remote_command(runner, config, diagnostics, &arg_refs).await
+    run_targeted_fetch(runner, config, diagnostics, false).await
 }
 
 pub(crate) async fn fetch_remote_preserving_local_commits(
@@ -739,38 +734,174 @@ pub(crate) async fn fetch_remote_preserving_local_commits(
     config: &AppConfig,
     diagnostics: Diagnostics,
 ) -> Result<()> {
-    let mut args = vec![
-        "git".to_owned(),
-        "fetch".to_owned(),
-        "--config".to_owned(),
-        "git.abandon-unreachable-commits=false".to_owned(),
-    ];
-    append_fetch_branch_flags(&mut args, runner, config).await?;
+    run_targeted_fetch(runner, config, diagnostics, true).await
+}
+
+/// Fetch only the branches whose remote tip actually moved, and skip the fetch
+/// entirely when none did.
+///
+/// A bare `jj git fetch` pulls and imports every branch on the remote, which
+/// dominates runtime on a large repo. forklift only reads trunk (for trunk
+/// movement plus landed and duplicate detection) and its own stack branches (so
+/// submit sees out-of-band pushes or deletions to a branch it is about to push).
+/// The local `refs/remotes/<remote>/*` refs are a cache of the last fetch, so we
+/// validate that cache with one cheap `git ls-remote` — a ref advertisement with
+/// no object transfer and no jj working-copy snapshot — and only `jj git fetch`
+/// the branches that diverged. In the steady state the stack branches match the
+/// cache and, unless trunk moved, the fetch is skipped altogether.
+async fn run_targeted_fetch(
+    runner: &impl CommandRunner,
+    config: &AppConfig,
+    diagnostics: Diagnostics,
+    preserve_local_commits: bool,
+) -> Result<()> {
+    let changed = changed_remote_branches(runner, config).await?;
+    if changed.is_empty() {
+        // The cache is current: trunk and every stack branch already match the
+        // remote, so there is nothing to download and jj's view is up to date.
+        tracing::debug!(remote = %config.remote, "remote refs already current; skipping fetch");
+        if diagnostics.dry_run {
+            diagnostics.plan_line(&format!(
+                "- remote `{}` refs already current; skip fetch",
+                config.remote
+            ));
+        }
+        return Ok(());
+    }
+
+    let mut args = vec!["git".to_owned(), "fetch".to_owned()];
+    if preserve_local_commits {
+        args.push("--config".to_owned());
+        args.push("git.abandon-unreachable-commits=false".to_owned());
+    }
+    for branch in &changed {
+        args.push("--branch".to_owned());
+        args.push(branch.clone());
+    }
     args.push("--remote".to_owned());
     args.push(config.remote.clone());
     let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
     run_fetch_remote_command(runner, config, diagnostics, &arg_refs).await
 }
 
-/// Restrict the trunk-movement fetches to the branches forklift actually reads:
-/// trunk (for trunk movement plus landed and duplicate detection, all ancestry
-/// checks against `<trunk>@<remote>`) and every local stack bookmark (so submit
-/// sees out-of-band pushes or deletions to a branch it is about to push, which
-/// jj propagates only for the branch patterns it fetches). Fetching these by
-/// name is dramatically cheaper than a bare `jj git fetch`, which pulls and
-/// imports every branch on the remote and dominates runtime on a large repo.
-async fn append_fetch_branch_flags(
-    args: &mut Vec<String>,
+/// Names of the branches whose remote tip differs from our local cache of it
+/// (`refs/remotes/<remote>/*`): trunk plus every local stack branch. A branch
+/// absent from both, or present at the same oid in both, is skipped; a branch
+/// present in the cache but gone from the remote (a deletion) is included so its
+/// stale tracking ref gets pruned. The comparison uses only plain `git` — one
+/// `ls-remote` ref advertisement and two `for-each-ref` reads — so the common
+/// "nothing changed" path costs a single network round-trip and no jj snapshot.
+async fn changed_remote_branches(
     runner: &impl CommandRunner,
     config: &AppConfig,
-) -> Result<()> {
-    args.push("--branch".to_owned());
-    args.push(config.trunk.clone());
-    for bookmark in local_stack_bookmarks(runner, config).await? {
-        args.push("--branch".to_owned());
-        args.push(bookmark);
+) -> Result<Vec<String>> {
+    let prefix = config.branch_prefix.trim_end_matches('/');
+    let mut names = vec![config.trunk.clone()];
+    names.extend(local_git_branch_names(runner, &format!("refs/heads/{prefix}/")).await?);
+    names.sort();
+    names.dedup();
+
+    let cached = remote_tracking_oids(runner, config).await?;
+    let live = ls_remote_oids(runner, config, &names).await?;
+
+    Ok(names
+        .into_iter()
+        .filter(|name| live.get(name) != cached.get(name))
+        .collect())
+}
+
+/// Short branch names under `ref_prefix` (e.g. `refs/heads/stack/`) as git sees
+/// them in the colocated repo. Read-only and snapshot-free.
+async fn local_git_branch_names(
+    runner: &impl CommandRunner,
+    ref_prefix: &str,
+) -> Result<Vec<String>> {
+    let output = git_run(
+        runner,
+        &["for-each-ref", "--format=%(refname:lstrip=2)", ref_prefix],
+    )
+    .await?;
+    if !output.success {
+        bail!(
+            "`git for-each-ref {ref_prefix}` failed: {}",
+            output.stderr.trim()
+        );
     }
-    Ok(())
+    Ok(output
+        .stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect())
+}
+
+/// Map of branch name to the oid of our local remote-tracking ref
+/// (`refs/remotes/<remote>/<name>`) — the cache of the last fetch.
+async fn remote_tracking_oids(
+    runner: &impl CommandRunner,
+    config: &AppConfig,
+) -> Result<HashMap<String, String>> {
+    let ref_prefix = format!("refs/remotes/{}/", config.remote);
+    let output = git_run(
+        runner,
+        &[
+            "for-each-ref",
+            "--format=%(objectname) %(refname:lstrip=3)",
+            &ref_prefix,
+        ],
+    )
+    .await?;
+    if !output.success {
+        bail!(
+            "`git for-each-ref {ref_prefix}` failed: {}",
+            output.stderr.trim()
+        );
+    }
+    let mut map = HashMap::new();
+    for line in output.stdout.lines() {
+        let Some((oid, name)) = line.trim().split_once(' ') else {
+            continue;
+        };
+        if name == "HEAD" {
+            continue;
+        }
+        map.insert(name.to_owned(), oid.to_owned());
+    }
+    Ok(map)
+}
+
+/// Map of branch name to its current oid on the remote, via a single
+/// `git ls-remote` restricted to the given branches (ref advertisement only, no
+/// object transfer). A branch missing from the result was deleted on the remote.
+async fn ls_remote_oids(
+    runner: &impl CommandRunner,
+    config: &AppConfig,
+    names: &[String],
+) -> Result<HashMap<String, String>> {
+    let mut args = vec!["ls-remote".to_owned(), config.remote.clone()];
+    for name in names {
+        args.push(format!("refs/heads/{name}"));
+    }
+    let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+    let output = git_run(runner, &arg_refs).await?;
+    if !output.success {
+        bail!(
+            "`git ls-remote {}` failed: {}",
+            config.remote,
+            output.stderr.trim()
+        );
+    }
+    let mut map = HashMap::new();
+    for line in output.stdout.lines() {
+        let Some((oid, refname)) = line.split_once('\t') else {
+            continue;
+        };
+        if let Some(name) = refname.trim().strip_prefix("refs/heads/") {
+            map.insert(name.to_owned(), oid.trim().to_owned());
+        }
+    }
+    Ok(map)
 }
 
 async fn run_fetch_remote_command(
