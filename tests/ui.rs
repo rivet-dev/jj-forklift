@@ -9,7 +9,7 @@ fn tracked_stacks_revset_covers_working_copy_submitted_and_frozen() {
     let revset = forklift::tracked_stacks_revset("stack");
     assert_eq!(
         revset,
-        "trunk() | trunk()..(@ | bookmarks(glob:'stack/*') | bookmarks(glob:'forklift/frozen/*'))"
+        "trunk() | @:: | trunk()..(@ | bookmarks(glob:'stack/*') | bookmarks(glob:'forklift/frozen/*'))"
     );
 }
 
@@ -17,7 +17,7 @@ fn tracked_stacks_revset_covers_working_copy_submitted_and_frozen() {
 fn tracked_stacks_revset_trims_trailing_slash_on_prefix() {
     assert_eq!(
         forklift::tracked_stacks_revset("feature/"),
-        "trunk() | trunk()..(@ | bookmarks(glob:'feature/*') | bookmarks(glob:'forklift/frozen/*'))"
+        "trunk() | @:: | trunk()..(@ | bookmarks(glob:'feature/*') | bookmarks(glob:'forklift/frozen/*'))"
     );
 }
 
@@ -39,7 +39,7 @@ fn ui_dry_run_uses_tracked_stacks_revset_by_default() -> anyhow::Result<()> {
     );
     assert!(
         rendered.contains(
-            "jjui -r trunk() | trunk()..(@ | bookmarks(glob:'stack/*') | bookmarks(glob:'forklift/frozen/*'))"
+            "jjui -r trunk() | @:: | trunk()..(@ | bookmarks(glob:'stack/*') | bookmarks(glob:'forklift/frozen/*'))"
         ),
         "expected tracked-stacks revset in dry-run output, got: {rendered}"
     );
