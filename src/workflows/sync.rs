@@ -176,35 +176,35 @@ pub(crate) async fn sync_stack(
                 .map_err(|error| phase_error("resolve-stack", revset, error))?;
         }
     }
-    // An empty owned stack is a "purely frozen" stack only when the working copy
-    // actually sits atop a frozen dependency chain. When nothing is owned and `@`
-    // is not on such a chain, there is nothing to sync: this covers the whole
-    // stack having just merged, an empty `@` on trunk with no frozen bookmarks,
-    // and an empty `@` on trunk whose only frozen bookmarks are unrelated or
-    // stale ones elsewhere in the repo. Move trunk to the fetched remote tip,
-    // carry the empty working copy, and finish rather than erroring on the empty
-    // stack or on out-of-scope frozen bookmarks.
+    // Nothing left to sync (e.g. the whole stack just merged): advance trunk and
+    // finish rather than failing on the empty stack.
+    if stack.is_empty() && frozen_bookmarks.is_empty() {
+        return finish_sync_at_trunk(
+            runner,
+            config,
+            cleaned_branches,
+            pruned_duplicates,
+            diagnostics,
+        )
+        .await;
+    }
     let stack_resolution = if stack.is_empty() {
         match resolve_purely_frozen_stack(runner, frozen_bookmarks)
             .await
             .map_err(|error| phase_error("resolve-stack", revset, error))?
         {
             Some(resolution) => resolution,
+            // `@` is detached from every frozen chain with nothing owned; advance
+            // to trunk and finish, same as an empty stack with no frozen bookmarks.
             None => {
-                diagnostics.phase("move-trunk");
-                move_trunk_to_remote(runner, config, diagnostics)
-                    .await
-                    .map_err(|error| phase_error("move-trunk", &config.trunk, error))?;
-                carry_empty_working_copy_to_trunk(runner, config, diagnostics)
-                    .await
-                    .map_err(|error| phase_error("carry-working-copy", "@", error))?;
-                return Ok(SyncSummary {
-                    rebased_roots: 0,
-                    submit_ran: false,
+                return finish_sync_at_trunk(
+                    runner,
+                    config,
                     cleaned_branches,
                     pruned_duplicates,
-                    conflicts: 0,
-                });
+                    diagnostics,
+                )
+                .await;
             }
         }
     } else {
@@ -370,6 +370,31 @@ async fn resolve_sync_submit_context(
         print_stack(&context.stack);
     }
     Ok(context)
+}
+
+/// Finish a sync with nothing left to do: move trunk to the fetched remote tip
+/// and carry the empty working copy onto it — the "get me back to trunk" path.
+async fn finish_sync_at_trunk(
+    runner: &impl CommandRunner,
+    config: &AppConfig,
+    cleaned_branches: usize,
+    pruned_duplicates: usize,
+    diagnostics: Diagnostics,
+) -> Result<SyncSummary> {
+    diagnostics.phase("move-trunk");
+    move_trunk_to_remote(runner, config, diagnostics)
+        .await
+        .map_err(|error| phase_error("move-trunk", &config.trunk, error))?;
+    carry_empty_working_copy_to_trunk(runner, config, diagnostics)
+        .await
+        .map_err(|error| phase_error("carry-working-copy", "@", error))?;
+    Ok(SyncSummary {
+        rebased_roots: 0,
+        submit_ran: false,
+        cleaned_branches,
+        pruned_duplicates,
+        conflicts: 0,
+    })
 }
 
 pub(crate) async fn prune_landed_duplicate_changes(

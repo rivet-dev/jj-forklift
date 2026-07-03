@@ -236,6 +236,38 @@ fn sync_from_empty_child_above_frozen_pr_succeeds() -> anyhow::Result<()> {
 }
 
 #[test]
+fn sync_from_detached_commit_with_leftover_frozen_advances_to_trunk() -> anyhow::Result<()> {
+    // After a frozen stack's PRs merge, `@` can end up on a plain commit off any
+    // frozen chain. Sync must recover by advancing to trunk instead of erroring.
+    let repo = TestRepo::new("sync-detached-frozen")?;
+    repo.init_main()?;
+    let imported = repo.create_change("imported", "imported title", "imported body")?;
+    let branch = branch_for("imported-title", &imported.change_id);
+    repo.set_bookmark(&branch, &imported.commit_id)?;
+    repo.push_bookmark(&branch)?;
+    repo.seed_pr(11, &branch, "main", "imported title", "imported body")?;
+
+    let get_output = repo.run(&["get", "11"])?;
+    assert_success("get 11", &get_output);
+
+    // Move off the frozen chain onto a fresh empty child of trunk, leaving the
+    // `forklift/frozen/pr-11` bookmark behind.
+    repo.jj(&["new", "main"])?;
+
+    let output = repo.run(&["sync"])?;
+    assert_success("sync", &output);
+    let stderr = stderr_of(&output);
+    // Recovered by advancing to trunk (Moving trunk) rather than erroring on the
+    // detached `@`, with nothing owned to rebase.
+    assert!(stderr.contains("Moving trunk"), "stderr:\n{stderr}");
+    assert!(
+        stderr.contains("0 roots rebased"),
+        "stderr:\n{stderr}"
+    );
+    Ok(())
+}
+
+#[test]
 fn sync_frozen_suffix_based_on_unfrozen_parent_succeeds() -> anyhow::Result<()> {
     let repo = TestRepo::new("sync-frozen-suffix")?;
     repo.init_main()?;

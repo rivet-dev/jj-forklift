@@ -163,14 +163,10 @@ pub(crate) async fn resolve_stack_resolution(
     Ok(resolution)
 }
 
-/// Resolve a stack with no owned changes as a purely frozen stack. Returns
-/// `Some` only when the working copy actually sits atop a frozen dependency
-/// chain (either directly on a frozen head or as its empty child). Returns
-/// `None` when there is nothing in scope to sync: no frozen bookmarks at all,
-/// or frozen bookmarks that exist elsewhere in the repo but are not below the
-/// working copy (e.g. an empty `@` on trunk with only unrelated or stale frozen
-/// bookmarks left over from an earlier `forklift get`). The caller treats `None`
-/// as a no-op sync that just advances trunk.
+/// Resolve the stack when nothing is owned but frozen bookmarks remain in scope.
+/// `Ok(Some(..))` when `@` sits on the frozen chain; `Ok(None)` when `@` is
+/// detached from it (deps merged, parked on trunk) — callers treat `None` as
+/// "advance to trunk" rather than an error.
 pub(crate) async fn resolve_purely_frozen_stack(
     runner: &impl CommandRunner,
     frozen_bookmarks: Vec<FrozenBookmark>,
@@ -209,6 +205,8 @@ pub(crate) async fn resolve_purely_frozen_stack(
         }
     };
 
+    // `@` is off every frozen chain with nothing owned; the frozen bookmarks are
+    // stale leftovers. Signal the caller to advance to trunk rather than block.
     Ok(None)
 }
 
