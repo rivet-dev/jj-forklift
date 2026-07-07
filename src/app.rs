@@ -36,6 +36,11 @@ const DEFAULT_TRUNK: &str = "main";
 const DEFAULT_REQUIRE_APPROVAL: bool = true;
 const DEFAULT_BRANCH_PREFIX: &str = "stack";
 const DEFAULT_STACK_REVSET: &str = "trunk()..@ & ~::(immutable_heads() | root()) & ~empty()";
+/// Submit operates on the whole stack containing `@`, not just its ancestors, so
+/// running `forklift submit` from the middle of a stack still submits everything
+/// above the working copy. `@::` walks the descendants; `trunk()..(@::)` keeps
+/// the ancestors below `@` too.
+const SUBMIT_STACK_REVSET: &str = "trunk()..(@::) & ~::(immutable_heads() | root()) & ~empty()";
 const STACK_FIELD_SEPARATOR: char = '\x1f';
 const STACK_RECORD_SEPARATOR: char = '\x1e';
 const STACK_LOG_TEMPLATE: &str = "json(change_id) ++ \"\\x1f\" ++ json(commit_id) ++ \"\\x1f\" ++ json(parents.map(|c| c.commit_id())) ++ \"\\x1f\" ++ json(description.first_line()) ++ \"\\x1f\" ++ json(description) ++ \"\\x1f\" ++ json(empty) ++ \"\\x1f\" ++ json(conflict) ++ \"\\x1f\" ++ json(divergent) ++ \"\\x1e\"";

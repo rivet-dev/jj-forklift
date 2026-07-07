@@ -247,6 +247,36 @@ fn two_change_submit_uses_parent_head_branch_base() -> anyhow::Result<()> {
 }
 
 #[test]
+fn submit_from_bottom_of_stack_submits_descendants() -> anyhow::Result<()> {
+    let repo = TestRepo::new("submit-from-bottom")?;
+    repo.init_main()?;
+    let stack = repo.create_linear_stack(2)?;
+    let bottom = branch_for("change-1-title", &stack[0].change_id);
+    let top = branch_for("change-2-title", &stack[1].change_id);
+    repo.seed_pr_number(&bottom, 11)?;
+    repo.seed_pr_number(&top, 12)?;
+
+    // Move the working copy to the bottom of the stack. With an ancestors-only
+    // revset (`trunk()..@`) the top change would be dropped; submit must walk
+    // descendants so the whole stack is still submitted.
+    repo.jj(&["edit", &stack[0].change_id])?;
+
+    let output = repo.run(&["submit", "--yes"])?;
+    assert_success("submit", &output);
+
+    let top_pr = repo.stored_pr(12)?;
+    assert_eq!(
+        top_pr["baseRefName"],
+        json!(bottom),
+        "top PR should target the bottom PR branch"
+    );
+    assert_eq!(repo.stored_pr(11)?["baseRefName"], json!("main"));
+    assert_eq!(repo.git_remote_branch_target(&bottom)?, stack[0].commit_id);
+    assert_eq!(repo.git_remote_branch_target(&top)?, stack[1].commit_id);
+    Ok(())
+}
+
+#[test]
 fn two_change_update_keeps_top_pr_based_on_bottom_branch() -> anyhow::Result<()> {
     let repo = TestRepo::new("two-update")?;
     repo.init_main()?;

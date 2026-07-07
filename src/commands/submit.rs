@@ -17,9 +17,9 @@ pub(crate) async fn run(
     // A read-only step, but on a large working copy jj's snapshot here can take a
     // while, so surface it (in dry-run too) rather than pausing silently.
     ui_progress("Resolving", "stack");
-    let mut context = resolve_stack_context(runner, DEFAULT_STACK_REVSET)
+    let mut context = resolve_stack_context(runner, SUBMIT_STACK_REVSET)
         .await
-        .map_err(|error| phase_error("resolve-stack", DEFAULT_STACK_REVSET, error))?;
+        .map_err(|error| phase_error("resolve-stack", SUBMIT_STACK_REVSET, error))?;
 
     // The pre-submit fetch fast-forwards the local trunk bookmark whenever
     // upstream moved, stranding the stack root behind the new trunk — a state
@@ -46,7 +46,7 @@ pub(crate) async fn run(
             diagnostics,
         )
         .await
-        .map_err(|error| phase_error("rebase-stack", DEFAULT_STACK_REVSET, error))?;
+        .map_err(|error| phase_error("rebase-stack", SUBMIT_STACK_REVSET, error))?;
         if dry_run {
             // The rebase was only planned, so the live commits still fail base
             // validation; stop at the plan rather than submitting stale ids.
@@ -57,9 +57,9 @@ pub(crate) async fn run(
             );
             return Ok(());
         }
-        let conflicts = report_sync_conflicts(runner, DEFAULT_STACK_REVSET)
+        let conflicts = report_sync_conflicts(runner, SUBMIT_STACK_REVSET)
             .await
-            .map_err(|error| phase_error("rebase-stack", DEFAULT_STACK_REVSET, error))?;
+            .map_err(|error| phase_error("rebase-stack", SUBMIT_STACK_REVSET, error))?;
         if conflicts > 0 {
             return Err(phase_error(
                 "rebase-stack",
@@ -73,9 +73,9 @@ pub(crate) async fn run(
                 ),
             ));
         }
-        context = resolve_stack_context(runner, DEFAULT_STACK_REVSET)
+        context = resolve_stack_context(runner, SUBMIT_STACK_REVSET)
             .await
-            .map_err(|error| phase_error("resolve-stack", DEFAULT_STACK_REVSET, error))?;
+            .map_err(|error| phase_error("resolve-stack", SUBMIT_STACK_REVSET, error))?;
     }
 
     if verbose {
