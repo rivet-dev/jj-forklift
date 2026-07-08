@@ -21,18 +21,33 @@ pub(crate) struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Commands {
+    /// Push branches and create or update PRs for the current stack.
+    #[command(visible_alias = "s")]
     Submit(SubmitOptions),
+    /// Fetch, advance trunk, and rebase tracked stacks onto it.
     Sync(SyncOptions),
+    /// Fast-forward trunk onto an approved, mergeable stack.
+    #[command(visible_alias = "m")]
     Merge(MergeOptions),
+    /// Fetch a PR and its stack into a local tracked stack.
+    #[command(visible_alias = "g")]
     Get(GetOptions),
+    /// Rebuild forklift's bookmarks and cache for a stack.
+    #[command(visible_alias = "r")]
     Repair(RepairOptions),
+    /// Turn a frozen dependency back into an owned, editable change.
+    #[command(visible_alias = "uf")]
     Unfreeze(UnfreezeOptions),
+    /// Show the state of tracked stacks and their PRs.
+    #[command(visible_alias = "st")]
     Status(StatusOptions),
     /// Adopt an existing branch and its open PR into forklift's tracked set.
+    #[command(visible_alias = "tr")]
     Track(TrackOptions),
     /// Open a pull request in your browser.
     Pr(PrOptions),
     /// Open the `jjui` terminal UI, filtered to tracked stacks by default.
+    #[command(visible_alias = "l")]
     Ui(UiOptions),
     /// Any other subcommand is passed straight through to `jj`.
     #[command(external_subcommand)]
@@ -62,6 +77,11 @@ pub(crate) struct SubmitOptions {
     /// Apply submit without prompting for confirmation.
     #[arg(short, long)]
     pub(crate) yes: bool,
+
+    /// Also submit changes stacked above the working copy (`@`), not just `@`
+    /// and its ancestors. By default submit stops at `@`.
+    #[arg(short, long)]
+    pub(crate) descendants: bool,
 }
 
 #[derive(Debug, Args)]

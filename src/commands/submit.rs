@@ -14,12 +14,20 @@ pub(crate) async fn run(
         .await
         .map_err(|error| phase_error("submit-fetch", &config.remote, error))?;
 
+    // By default submit stops at `@` (ancestors only). `--descendants` extends the
+    // stack to changes stacked above `@` so a submit from mid-stack covers them.
+    let revset = if options.descendants {
+        SUBMIT_STACK_REVSET
+    } else {
+        DEFAULT_STACK_REVSET
+    };
+
     // A read-only step, but on a large working copy jj's snapshot here can take a
     // while, so surface it (in dry-run too) rather than pausing silently.
     ui_progress("Resolving", "stack");
-    let mut context = resolve_stack_context(runner, SUBMIT_STACK_REVSET)
+    let mut context = resolve_stack_context(runner, revset)
         .await
-        .map_err(|error| phase_error("resolve-stack", SUBMIT_STACK_REVSET, error))?;
+        .map_err(|error| phase_error("resolve-stack", revset, error))?;
 
     // The pre-submit fetch fast-forwards the local trunk bookmark whenever
     // upstream moved, stranding the stack root behind the new trunk — a state
@@ -46,7 +54,7 @@ pub(crate) async fn run(
             diagnostics,
         )
         .await
-        .map_err(|error| phase_error("rebase-stack", SUBMIT_STACK_REVSET, error))?;
+        .map_err(|error| phase_error("rebase-stack", revset, error))?;
         if dry_run {
             // The rebase was only planned, so the live commits still fail base
             // validation; stop at the plan rather than submitting stale ids.
@@ -57,9 +65,9 @@ pub(crate) async fn run(
             );
             return Ok(());
         }
-        let conflicts = report_sync_conflicts(runner, SUBMIT_STACK_REVSET)
+        let conflicts = report_sync_conflicts(runner, revset)
             .await
-            .map_err(|error| phase_error("rebase-stack", SUBMIT_STACK_REVSET, error))?;
+            .map_err(|error| phase_error("rebase-stack", revset, error))?;
         if conflicts > 0 {
             return Err(phase_error(
                 "rebase-stack",
@@ -73,9 +81,9 @@ pub(crate) async fn run(
                 ),
             ));
         }
-        context = resolve_stack_context(runner, SUBMIT_STACK_REVSET)
+        context = resolve_stack_context(runner, revset)
             .await
-            .map_err(|error| phase_error("resolve-stack", SUBMIT_STACK_REVSET, error))?;
+            .map_err(|error| phase_error("resolve-stack", revset, error))?;
     }
 
     if verbose {

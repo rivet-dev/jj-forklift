@@ -256,12 +256,12 @@ fn submit_from_bottom_of_stack_submits_descendants() -> anyhow::Result<()> {
     repo.seed_pr_number(&bottom, 11)?;
     repo.seed_pr_number(&top, 12)?;
 
-    // Move the working copy to the bottom of the stack. With an ancestors-only
-    // revset (`trunk()..@`) the top change would be dropped; submit must walk
-    // descendants so the whole stack is still submitted.
+    // Move the working copy to the bottom of the stack. With the ancestors-only
+    // default the top change would be dropped; `--descendants` walks past `@` so
+    // the whole stack is still submitted.
     repo.jj(&["edit", &stack[0].change_id])?;
 
-    let output = repo.run(&["submit", "--yes"])?;
+    let output = repo.run(&["submit", "--yes", "--descendants"])?;
     assert_success("submit", &output);
 
     let top_pr = repo.stored_pr(12)?;
@@ -273,6 +273,31 @@ fn submit_from_bottom_of_stack_submits_descendants() -> anyhow::Result<()> {
     assert_eq!(repo.stored_pr(11)?["baseRefName"], json!("main"));
     assert_eq!(repo.git_remote_branch_target(&bottom)?, stack[0].commit_id);
     assert_eq!(repo.git_remote_branch_target(&top)?, stack[1].commit_id);
+    Ok(())
+}
+
+#[test]
+fn submit_from_bottom_defaults_to_ancestors_only() -> anyhow::Result<()> {
+    let repo = TestRepo::new("submit-from-bottom-default")?;
+    repo.init_main()?;
+    let stack = repo.create_linear_stack(2)?;
+    let bottom = branch_for("change-1-title", &stack[0].change_id);
+    let top = branch_for("change-2-title", &stack[1].change_id);
+    repo.seed_pr_number(&bottom, 11)?;
+    repo.seed_pr_number(&top, 12)?;
+
+    repo.jj(&["edit", &stack[0].change_id])?;
+
+    // Without `--descendants`, submit stops at `@`: only the bottom change is
+    // pushed and the change stacked above it is left untouched.
+    let output = repo.run(&["submit", "--yes"])?;
+    assert_success("submit", &output);
+
+    assert_eq!(repo.git_remote_branch_target(&bottom)?, stack[0].commit_id);
+    assert!(
+        repo.git_remote_branch_target(&top).is_err(),
+        "change above `@` should be left unsubmitted without --descendants"
+    );
     Ok(())
 }
 
