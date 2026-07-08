@@ -263,38 +263,89 @@ pub(crate) async fn sync_stack(
             .map_err(|error| phase_error("resolve-stack", &submit_revset, error))?
     };
 
-    let prompted_submit = if submit {
-        false
-    } else {
-        prompt_submit_after_sync(rebased_roots, conflicts, diagnostics.dry_run)?
+    let not_submitted = SyncSummary {
+        rebased_roots,
+        submit_ran: false,
+        cleaned_branches,
+        pruned_duplicates,
+        conflicts,
     };
-    let should_submit = submit || prompted_submit;
-    let submit_yes = yes || prompted_submit;
-    if !should_submit {
-        return Ok(SyncSummary {
-            rebased_roots,
-            submit_ran: false,
-            cleaned_branches,
-            pruned_duplicates,
-            conflicts,
-        });
-    }
+    let submitted = SyncSummary {
+        submit_ran: true,
+        ..not_submitted.clone()
+    };
 
-    if diagnostics.dry_run {
-        diagnostics.plan_line("run submit after sync");
-        return Ok(SyncSummary {
-            rebased_roots,
-            submit_ran: true,
-            cleaned_branches,
-            pruned_duplicates,
-            conflicts,
-        });
-    }
-
-    diagnostics.phase("sync-submit");
-    let mut context = resolve_stack_context(runner, &submit_revset)
+    // Explicit `--submit`: no interactive offer. A dry run just notes the intent
+    // rather than resolving and printing a plan it will not apply.
+    if submit {
+        if diagnostics.dry_run {
+            diagnostics.plan_line("run submit after sync");
+            return Ok(submitted);
+        }
+        let context = resolve_sync_submit_context(runner, &submit_revset, frozen_refresh, diagnostics)
+            .await?;
+        submit_stack(
+            runner,
+            config,
+            &context,
+            yes,
+            "forklift sync --submit --yes",
+            diagnostics,
+        )
         .await
-        .map_err(|error| phase_error("sync-submit", &submit_revset, error))?;
+        .map_err(|error| phase_error("sync-submit", "submit", error))?;
+        return Ok(submitted);
+    }
+
+    // Interactive offer: only worth prompting when something was actually rebased,
+    // no conflicts block a clean submit, and stdin is a terminal.
+    if diagnostics.dry_run || rebased_roots == 0 || conflicts > 0 || !io::stdin().is_terminal() {
+        return Ok(not_submitted);
+    }
+
+    // Resolve and plan the submit up front so the change list — which PRs would be
+    // created, updated, or left unchanged — is printed before the prompt, letting
+    // the user decide with the same information the `submit` command shows.
+    diagnostics.phase("sync-submit");
+    let context =
+        resolve_sync_submit_context(runner, &submit_revset, frozen_refresh, diagnostics).await?;
+    let planned = plan_submit_stack(runner, config, &context, diagnostics)
+        .await
+        .map_err(|error| phase_error("sync-submit", "plan", error))?;
+    print_submit_action_plan(&context.github.repo, planned.plans());
+
+    if !prompt_submit_after_sync()? {
+        return Ok(not_submitted);
+    }
+
+    submit_planned(
+        runner,
+        config,
+        &context,
+        planned,
+        true,
+        "forklift sync --submit --yes",
+        false,
+        diagnostics,
+    )
+    .await
+    .map_err(|error| phase_error("sync-submit", "submit", error))?;
+
+    Ok(submitted)
+}
+
+/// Resolve the stack context for the post-sync submit, applying the GitHub
+/// context discovered while refreshing frozen dependencies so submit reuses it
+/// instead of resolving the repository again.
+async fn resolve_sync_submit_context(
+    runner: &impl CommandRunner,
+    submit_revset: &str,
+    frozen_refresh: SyncFrozenRefresh,
+    diagnostics: Diagnostics,
+) -> Result<AppContext> {
+    let mut context = resolve_stack_context(runner, submit_revset)
+        .await
+        .map_err(|error| phase_error("sync-submit", submit_revset, error))?;
     if let Some(github) = frozen_refresh.github {
         context.github = github;
     }
@@ -302,24 +353,7 @@ pub(crate) async fn sync_stack(
         print_github_context(&context.github);
         print_stack(&context.stack);
     }
-    submit_stack(
-        runner,
-        config,
-        &context,
-        submit_yes,
-        "forklift sync --submit --yes",
-        diagnostics,
-    )
-    .await
-    .map_err(|error| phase_error("sync-submit", "submit", error))?;
-
-    Ok(SyncSummary {
-        rebased_roots,
-        submit_ran: true,
-        cleaned_branches,
-        pruned_duplicates,
-        conflicts,
-    })
+    Ok(context)
 }
 
 pub(crate) async fn prune_landed_duplicate_changes(
@@ -424,15 +458,10 @@ async fn landed_change_commits(
         .collect())
 }
 
-pub(crate) fn prompt_submit_after_sync(
-    rebased_roots: usize,
-    conflicts: usize,
-    dry_run: bool,
-) -> Result<bool> {
-    if dry_run || rebased_roots == 0 || conflicts > 0 || !io::stdin().is_terminal() {
-        return Ok(false);
-    }
-
+/// Prompt to apply the just-printed submit plan. Callers gate this on there being
+/// something worth submitting (a rebase happened, no conflicts, interactive tty)
+/// and print the change list first, so this only reads the answer.
+pub(crate) fn prompt_submit_after_sync() -> Result<bool> {
     eprint!("Submit updated PRs now? [y/N] ");
     io::stderr().flush().context("flush sync submit prompt")?;
     let mut answer = String::new();

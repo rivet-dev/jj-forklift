@@ -601,14 +601,34 @@ pub(crate) async fn adopted_head_bookmark_for_change(
     }
 }
 
-pub(crate) async fn submit_stack(
+/// A resolved submit plan awaiting application: every branch, PR create/update/
+/// no-op decision, and orphaned PR, computed without mutating anything. Produced
+/// by [`plan_submit_stack`] and consumed by [`submit_planned`] so callers can
+/// render the change list before deciding whether to apply it.
+pub(crate) struct SubmitPlanned {
+    plans: Vec<SubmitPlan>,
+    orphaned_prs: Vec<OrphanedPr>,
+    frozen_entries: Vec<(String, PrCacheEntry)>,
+    store: CacheStore,
+    summary: SubmitSummary,
+}
+
+impl SubmitPlanned {
+    pub(crate) fn plans(&self) -> &[SubmitPlan] {
+        &self.plans
+    }
+}
+
+/// Resolve the submit plan for `context` — head branches, PR create/update/no-op
+/// decisions, and orphaned PRs — without touching any branch, PR, or comment.
+/// Split from execution so callers such as sync's post-rebase submit offer can
+/// print the exact change list before prompting the user to apply it.
+pub(crate) async fn plan_submit_stack(
     runner: &impl CommandRunner,
     config: &AppConfig,
     context: &AppContext,
-    yes: bool,
-    yes_command: &str,
     diagnostics: Diagnostics,
-) -> Result<SubmitSummary> {
+) -> Result<SubmitPlanned> {
     // Surface divergence before planning so the heads-up is visible regardless of
     // which copy the PR bookmark was stranded on; the push phase re-points it.
     warn_divergent_changes(&context.stack);
@@ -621,7 +641,7 @@ pub(crate) async fn submit_stack(
         .map_err(|error| phase_error("validate-submit-bases", "stack", error))?;
 
     tracing::debug!(phase = "plan-submit", "recovery phase");
-    let mut store = CacheStore::load_current_best_effort(runner, diagnostics, "plan-submit")
+    let store = CacheStore::load_current_best_effort(runner, diagnostics, "plan-submit")
         .await
         .map_err(|error| phase_error("plan-submit", "cache", error))?;
     diagnostics.repo_details(&store);
@@ -715,7 +735,7 @@ pub(crate) async fn submit_stack(
         ui_finish_progress_bar(progress);
     }
 
-    let mut summary = SubmitSummary {
+    let summary = SubmitSummary {
         pushed_refs: plans.iter().filter(|plan| plan.push_needed).count(),
         created_prs: plans
             .iter()
@@ -731,6 +751,49 @@ pub(crate) async fn submit_stack(
             .count(),
         ..SubmitSummary::default()
     };
+
+    Ok(SubmitPlanned {
+        plans,
+        orphaned_prs,
+        frozen_entries,
+        store,
+        summary,
+    })
+}
+
+pub(crate) async fn submit_stack(
+    runner: &impl CommandRunner,
+    config: &AppConfig,
+    context: &AppContext,
+    yes: bool,
+    yes_command: &str,
+    diagnostics: Diagnostics,
+) -> Result<SubmitSummary> {
+    let planned = plan_submit_stack(runner, config, context, diagnostics).await?;
+    submit_planned(runner, config, context, planned, yes, yes_command, true, diagnostics).await
+}
+
+/// Apply an already-resolved [`SubmitPlanned`]: print the plan, confirm, then
+/// push branches and create/update PRs and stack comments. `print_action_plan`
+/// is false when the caller already rendered the change list (e.g. sync's
+/// post-rebase offer prints it before its own prompt) so it isn't shown twice.
+pub(crate) async fn submit_planned(
+    runner: &impl CommandRunner,
+    config: &AppConfig,
+    context: &AppContext,
+    planned: SubmitPlanned,
+    yes: bool,
+    yes_command: &str,
+    print_action_plan: bool,
+    diagnostics: Diagnostics,
+) -> Result<SubmitSummary> {
+    let SubmitPlanned {
+        mut plans,
+        orphaned_prs,
+        frozen_entries,
+        mut store,
+        mut summary,
+    } = planned;
 
     diagnostics.print_submit_plan(config, context, &plans);
     if diagnostics.dry_run {
@@ -748,7 +811,9 @@ pub(crate) async fn submit_stack(
         );
         return Ok(summary);
     }
-    print_submit_action_plan(&context.github.repo, &plans);
+    if print_action_plan {
+        print_submit_action_plan(&context.github.repo, &plans);
+    }
     confirm_submit_stack(yes, yes_command)?;
 
     // Anything that touches a file between planning and here — a build tool
