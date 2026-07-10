@@ -148,7 +148,9 @@ async fn track_branch_locally(
     diagnostics: Diagnostics,
 ) -> Result<TrackOutcome> {
     if branch.is_empty() || branch.starts_with('-') {
-        bail!(CliError::new(format!("`{branch}` is not a usable branch name")));
+        bail!(CliError::new(format!(
+            "`{branch}` is not a usable branch name"
+        )));
     }
 
     diagnostics.phase("resolve-branch");
@@ -251,7 +253,14 @@ async fn set_local_bookmark(
 /// True when `commit_id` is part of the current owned stack (`trunk()..@`).
 async fn commit_is_in_current_stack(runner: &impl CommandRunner, commit_id: &str) -> Result<bool> {
     let revset = format!("({commit_id}) & (trunk()..@)");
-    let args = ["log", "--no-graph", "-r", &revset, "-T", "commit_id ++ \"\\n\""];
+    let args = [
+        "log",
+        "--no-graph",
+        "-r",
+        &revset,
+        "-T",
+        "commit_id ++ \"\\n\"",
+    ];
     let output = runner.run("jj", &args).await?;
     if !output.success {
         bail!(

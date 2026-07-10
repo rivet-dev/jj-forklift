@@ -296,14 +296,16 @@ pub(crate) async fn resolve_pr_url(
         None => {
             ensure_default_pr_target_is_stack_change(runner, config).await?;
             let change_id = current_change_id(runner).await?;
-            let pr = lookup_get_target_pr(runner, github, &change_id, "pr").await.map_err(|_| {
-                CliError::new("current revision is not submitted")
-                    .reason(format!(
-                        "current change `{}` has no open PR yet",
-                        change_id_branch_prefix(&change_id)
-                    ))
-                    .resolution("run `forklift submit --yes`, then `forklift pr`")
-            })?;
+            let pr = lookup_get_target_pr(runner, github, &change_id, "pr")
+                .await
+                .map_err(|_| {
+                    CliError::new("current revision is not submitted")
+                        .reason(format!(
+                            "current change `{}` has no open PR yet",
+                            change_id_branch_prefix(&change_id)
+                        ))
+                        .resolution("run `forklift submit --yes`, then `forklift pr`")
+                })?;
             Ok((pr.number, github_pr_url(&github.repo, pr.number)))
         }
     }

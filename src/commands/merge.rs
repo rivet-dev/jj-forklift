@@ -69,15 +69,16 @@ pub(crate) async fn run(
                 unfreeze_before_retrying_merge(runner, &config, &unfreeze_required, diagnostics)
                     .await?;
                 let sync_target = unfreeze_required.target.as_deref();
-                let sync_revset = effective_sync_revset(runner, sync_target)
-                    .await
-                    .map_err(|error| {
-                        phase_error(
-                            "resolve-sync-target",
-                            sync_target.unwrap_or(DEFAULT_STACK_REVSET),
-                            error,
-                        )
-                    })?;
+                let sync_revset =
+                    effective_sync_revset(runner, sync_target)
+                        .await
+                        .map_err(|error| {
+                            phase_error(
+                                "resolve-sync-target",
+                                sync_target.unwrap_or(DEFAULT_STACK_REVSET),
+                                error,
+                            )
+                        })?;
                 sync_stack(
                     runner,
                     &config,

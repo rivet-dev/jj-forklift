@@ -48,18 +48,20 @@ pub(crate) async fn resolve_stack(
     runner: &impl CommandRunner,
     revset: &str,
 ) -> Result<Vec<ResolvedChange>> {
-    let output = runner.run(
-        "jj",
-        &[
-            "log",
-            "--no-graph",
-            "--reversed",
-            "-r",
-            revset,
-            "-T",
-            STACK_LOG_TEMPLATE,
-        ],
-    ).await?;
+    let output = runner
+        .run(
+            "jj",
+            &[
+                "log",
+                "--no-graph",
+                "--reversed",
+                "-r",
+                revset,
+                "-T",
+                STACK_LOG_TEMPLATE,
+            ],
+        )
+        .await?;
     if !output.success {
         bail!(
             "`{}` failed: {}",
@@ -79,7 +81,9 @@ pub(crate) async fn resolve_stack(
         );
     }
 
-    parse_stack_log(runner, &output.stdout).await.context("parse jj stack log")
+    parse_stack_log(runner, &output.stdout)
+        .await
+        .context("parse jj stack log")
 }
 
 pub(crate) async fn resolve_stack_context(
@@ -185,7 +189,10 @@ pub(crate) fn description_body(description: &str, title: &str) -> String {
 }
 
 #[tracing::instrument(level = "trace", skip_all, fields(commit = %commit_id))]
-pub(crate) async fn resolve_tree_id(runner: &impl CommandRunner, commit_id: &str) -> Result<String> {
+pub(crate) async fn resolve_tree_id(
+    runner: &impl CommandRunner,
+    commit_id: &str,
+) -> Result<String> {
     git_run_required(runner, &["show", "-s", "--format=%T", commit_id])
         .await
         .with_context(|| format!("resolve tree id for commit {commit_id}"))

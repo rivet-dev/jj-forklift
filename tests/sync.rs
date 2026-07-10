@@ -96,7 +96,8 @@ fn sync_reports_rebase_conflicts() -> anyhow::Result<()> {
         "stderr:\n{stderr}"
     );
     assert!(
-        stderr.contains("Finished sync — 1 stack(s), 1 roots rebased, 1 conflict(s), submit skipped"),
+        stderr
+            .contains("Finished sync — 1 stack(s), 1 roots rebased, 1 conflict(s), submit skipped"),
         "stderr:\n{stderr}"
     );
     assert_eq!(repo.git_remote_branch_target("main")?, remote.commit_id);
@@ -460,7 +461,10 @@ fn sync_leaves_empty_working_copy_on_rebased_stack_top() -> anyhow::Result<()> {
     assert_success("sync", &output);
 
     let rebased = repo.change_at(&change.change_id)?;
-    assert_ne!(rebased.commit_id, change.commit_id, "stack should be rebased");
+    assert_ne!(
+        rebased.commit_id, change.commit_id,
+        "stack should be rebased"
+    );
     let stack_parent = repo.rev_commit_id(&format!("{}-", rebased.commit_id))?;
     assert_eq!(stack_parent, advanced);
     let wc_after = repo.change_at("@")?;
@@ -716,7 +720,10 @@ fn sync_prunes_landed_conflicted_stack_bookmark_but_keeps_unlanded() -> anyhow::
         repo.jj(&["--at-op", &base, "bookmark", "create", name, "-r", b])?;
         repo.jj(&["log", "-r", "@", "-T", "commit_id"])?; // force op merge
     }
-    assert!(repo.bookmark_exists(&feat_branch)?, "feature bookmark seeded");
+    assert!(
+        repo.bookmark_exists(&feat_branch)?,
+        "feature bookmark seeded"
+    );
     assert!(repo.bookmark_exists(&g_branch)?, "other bookmark seeded");
 
     let output = repo.run(&["sync"])?;

@@ -142,50 +142,141 @@ pub(crate) fn repair_pr_list(numbers: &[u64]) -> String {
     }
 }
 
-pub(crate) fn print_submit_action_plan(repo: &str, plans: &[SubmitPlan]) {
-    render_submit_action_plan(repo, plans, print_submit_plan_line);
+/// How a colored presenter tints an action row's verb. The renderer picks the
+/// variant from the plan itself, so color follows structure — a layout change
+/// (e.g. dropping a row's number) can no longer strip color the way re-parsing a
+/// finished string once did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SubmitActionStyle {
+    Create,
+    Update,
+    Unchanged,
+    Sync,
 }
 
-pub(crate) fn render_submit_action_plan(
-    repo: &str,
-    plans: &[SubmitPlan],
-    mut emit: impl FnMut(&str),
-) {
-    emit("");
-    emit("actions:");
-    // Right-align the action numbers so their periods and descriptions line up
-    // once the count crosses into double digits (`  9.` vs ` 10.`). The last
-    // number is the trailing sync-comments action, so its digit count sets the
-    // column width (`ilog10 + 1`, no allocation).
-    let width = (plans.len() + 1).ilog10() as usize + 1;
-    for (index, plan) in plans.iter().enumerate() {
-        emit(&format!(
-            "  {number:>width$}. {}",
-            submit_action_description(repo, plan),
-            number = index + 1,
-        ));
+/// One rendered line of the submit action plan. Presenters turn these into
+/// strings — coloring `Header`/`Action` by kind — instead of reverse-engineering
+/// structure out of already-built text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SubmitPlanLine {
+    Blank,
+    Header(&'static str),
+    Action {
+        /// Left margin including the number-or-spaces prefix, e.g. `"  1. "` or
+        /// `"     "`. Computed once at render time so rows stay aligned.
+        indent: String,
+        style: SubmitActionStyle,
+        /// The colored portion (`"update"`, `"create new PR"`, ...).
+        verb: &'static str,
+        /// The uncolored remainder (` PR #1 \`title\``).
+        detail: String,
+    },
+}
+
+pub(crate) fn print_submit_action_plan(repo: &str, plans: &[SubmitPlan]) {
+    let color = ui_color_enabled();
+    for line in submit_action_plan_lines(repo, plans) {
+        eprintln!("{}", present_submit_plan_line(&line, color));
+    }
+}
+
+pub(crate) fn submit_action_plan_lines(repo: &str, plans: &[SubmitPlan]) -> Vec<SubmitPlanLine> {
+    let mut lines = vec![SubmitPlanLine::Blank, SubmitPlanLine::Header("actions")];
+    // Only changed PRs (create/update) get a number; unchanged PRs carry no
+    // number and are indented to line up under the numbered descriptions, so the
+    // numbers count actual work and can skip (`1`, then `3`). Right-align them so
+    // periods and descriptions line up once the count crosses into double digits
+    // (`  9.` vs ` 10.`). The trailing sync-comments action takes the final
+    // number, so the count of numbered lines sets the column width.
+    let numbered = plans
+        .iter()
+        .filter(|plan| plan.existing_pr.is_none() || plan.pr_update_needed)
+        .count();
+    let width = (numbered + 1).ilog10() as usize + 1;
+    let mut number = 0usize;
+    for plan in plans.iter() {
+        let unchanged = plan.existing_pr.is_some() && !plan.pr_update_needed;
+        // Blank column plus two spaces stands in for the `N. ` prefix so the
+        // unchanged row lines up with the numbered rows above and below it.
+        let indent = if unchanged {
+            format!("  {:width$}  ", "")
+        } else {
+            number += 1;
+            format!("  {number:>width$}. ")
+        };
+        let (style, verb, detail) = submit_action_parts(repo, plan);
+        lines.push(SubmitPlanLine::Action {
+            indent,
+            style,
+            verb,
+            detail,
+        });
     }
     if !plans.is_empty() {
-        emit(&format!(
-            "  {number:>width$}. sync stack comments for submitted stack",
-            number = plans.len() + 1,
-        ));
+        number += 1;
+        lines.push(SubmitPlanLine::Action {
+            indent: format!("  {number:>width$}. "),
+            style: SubmitActionStyle::Sync,
+            verb: "sync",
+            detail: " stack comments for submitted stack".to_owned(),
+        });
     }
-    emit("");
+    lines.push(SubmitPlanLine::Blank);
+    lines
 }
 
-pub(crate) fn submit_action_description(repo: &str, plan: &SubmitPlan) -> String {
-    let pr_ref = |pr_number: u64| {
-        ui_hyperlink(&github_pr_url(repo, pr_number), &format!("#{pr_number}"))
-    };
-
+/// Splits a plan into its colored verb and uncolored detail. Building the two
+/// halves here means the presenter never has to find the verb inside a rendered
+/// string.
+fn submit_action_parts(repo: &str, plan: &SubmitPlan) -> (SubmitActionStyle, &'static str, String) {
+    let pr_ref =
+        |pr_number: u64| ui_hyperlink(&github_pr_url(repo, pr_number), &format!("#{pr_number}"));
     match &plan.existing_pr {
-        None => format!("create new PR `{}`", plan.change.title),
-        Some(existing) if plan.pr_update_needed => {
-            format!("update PR {} `{}`", pr_ref(existing.pr_number), plan.change.title)
+        None => (
+            SubmitActionStyle::Create,
+            "create new PR",
+            format!(" `{}`", plan.change.title),
+        ),
+        Some(existing) if plan.pr_update_needed => (
+            SubmitActionStyle::Update,
+            "update",
+            format!(" PR {} `{}`", pr_ref(existing.pr_number), plan.change.title),
+        ),
+        Some(existing) => (
+            SubmitActionStyle::Unchanged,
+            "unchanged",
+            format!(" PR {} `{}`", pr_ref(existing.pr_number), plan.change.title),
+        ),
+    }
+}
+
+pub(crate) fn present_submit_plan_line(line: &SubmitPlanLine, color: bool) -> String {
+    match line {
+        SubmitPlanLine::Blank => String::new(),
+        SubmitPlanLine::Header(label) => {
+            if color {
+                format!("{}:", label.cyan().bold())
+            } else {
+                format!("{label}:")
+            }
         }
-        Some(existing) => {
-            format!("unchanged PR {} `{}`", pr_ref(existing.pr_number), plan.change.title)
+        SubmitPlanLine::Action {
+            indent,
+            style,
+            verb,
+            detail,
+        } => {
+            let verb = if color {
+                match style {
+                    SubmitActionStyle::Create => verb.green().to_string(),
+                    SubmitActionStyle::Update => verb.yellow().to_string(),
+                    SubmitActionStyle::Unchanged => verb.dimmed().to_string(),
+                    SubmitActionStyle::Sync => verb.cyan().to_string(),
+                }
+            } else {
+                (*verb).to_string()
+            };
+            format!("{indent}{verb}{detail}")
         }
     }
 }
@@ -405,56 +496,6 @@ pub(crate) async fn unfreeze_before_retrying_merge(
         unfreeze_stack(runner, config, target, diagnostics).await?;
     }
     Ok(())
-}
-
-pub(crate) fn print_submit_plan_line(line: &str) {
-    if ui_color_enabled() {
-        if let Some((label, rest)) = line.split_once(':') {
-            if label.trim() == "actions" {
-                eprintln!("{}:{rest}", label.cyan().bold());
-                return;
-            }
-        }
-        if let Some(line) = color_submit_action_line(line) {
-            eprintln!("{line}");
-            return;
-        }
-    }
-    eprintln!("{line}");
-}
-
-pub(crate) fn color_submit_action_line(line: &str) -> Option<String> {
-    let after_number = line.trim_start().split_once(". ")?.1;
-    let action_end = submit_action_label_end(after_number)?;
-    let prefix_len = line.len() - after_number.len();
-    let prefix = &line[..prefix_len];
-    let action = &after_number[..action_end];
-    let rest = &after_number[action_end..];
-    let colored = match action {
-        action if action.starts_with("unchanged") => action.dimmed().to_string(),
-        action if action.starts_with("create") => action.green().to_string(),
-        action if action.starts_with("update") => action.yellow().to_string(),
-        action if action.starts_with("sync") => action.cyan().to_string(),
-        action if action.starts_with("close") || action.starts_with("delete") => {
-            action.red().to_string()
-        }
-        _ => return None,
-    };
-    Some(format!("{prefix}{colored}{rest}"))
-}
-
-pub(crate) fn submit_action_label_end(action_line: &str) -> Option<usize> {
-    if action_line.starts_with("create new PR") {
-        return Some("create new PR".len());
-    }
-    // Match " PR " rather than " PR #" so the action label still resolves when
-    // the PR number is wrapped in an OSC 8 hyperlink escape.
-    for marker in [" PR ", " stack comments"] {
-        if let Some(index) = action_line.find(marker) {
-            return Some(index);
-        }
-    }
-    action_line.find(':')
 }
 
 pub(crate) fn print_repair_plan_line(line: &str) {

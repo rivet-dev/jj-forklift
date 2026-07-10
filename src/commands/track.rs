@@ -11,7 +11,11 @@ pub(crate) async fn run(
 ) -> Result<()> {
     let outcome = track_target(runner, config, &options.target, diagnostics).await?;
 
-    let prefix = if dry_run { "track (dry run) — would adopt" } else { "track — adopted" };
+    let prefix = if dry_run {
+        "track (dry run) — would adopt"
+    } else {
+        "track — adopted"
+    };
     let summary = match outcome.pr_number {
         Some(number) => format!(
             "{prefix} PR #{number} as `{}` ({})",

@@ -277,96 +277,116 @@ async fn run_command(cli: Cli, runner: &impl CommandRunner, cwd: &str) -> Result
     }
 
     match cli.command {
-        Commands::Submit(options) => commands::submit::run(
-            runner,
-            &config,
-            options,
-            diagnostics,
-            cli.verbose,
-            cli.dry_run,
-        )
-        .await?,
-        Commands::Sync(options) => commands::sync::run(
-            runner,
-            &config,
-            options,
-            diagnostics,
-            cli.verbose,
-            cli.dry_run,
-        )
-        .await?,
-        Commands::Merge(options) => commands::merge::run(
-            runner,
-            &config,
-            options,
-            diagnostics,
-            cli.verbose,
-            cli.dry_run,
-        )
-        .await?,
-        Commands::Get(options) => commands::get::run(
-            runner,
-            &config,
-            options,
-            diagnostics,
-            cli.verbose,
-            cli.dry_run,
-        )
-        .await?,
-        Commands::Repair(options) => commands::repair::run(
-            runner,
-            &config,
-            options,
-            diagnostics,
-            cli.verbose,
-            cli.dry_run,
-        )
-        .await?,
-        Commands::Unfreeze(options) => commands::unfreeze::run(
-            runner,
-            &config,
-            options,
-            diagnostics,
-            cli.verbose,
-            cli.dry_run,
-        )
-        .await?,
-        Commands::Status(options) => commands::status::run(
-            runner,
-            &config,
-            options,
-            diagnostics,
-            cli.verbose,
-            cli.dry_run,
-        )
-        .await?,
-        Commands::Track(options) => commands::track::run(
-            runner,
-            &config,
-            options,
-            diagnostics,
-            cli.verbose,
-            cli.dry_run,
-        )
-        .await?,
-        Commands::Pr(options) => commands::pr::run(
-            runner,
-            &config,
-            options,
-            diagnostics,
-            cli.verbose,
-            cli.dry_run,
-        )
-        .await?,
-        Commands::Ui(options) => commands::ui::run(
-            runner,
-            &config,
-            options,
-            diagnostics,
-            cli.verbose,
-            cli.dry_run,
-        )
-        .await?,
+        Commands::Submit(options) => {
+            commands::submit::run(
+                runner,
+                &config,
+                options,
+                diagnostics,
+                cli.verbose,
+                cli.dry_run,
+            )
+            .await?
+        }
+        Commands::Sync(options) => {
+            commands::sync::run(
+                runner,
+                &config,
+                options,
+                diagnostics,
+                cli.verbose,
+                cli.dry_run,
+            )
+            .await?
+        }
+        Commands::Merge(options) => {
+            commands::merge::run(
+                runner,
+                &config,
+                options,
+                diagnostics,
+                cli.verbose,
+                cli.dry_run,
+            )
+            .await?
+        }
+        Commands::Get(options) => {
+            commands::get::run(
+                runner,
+                &config,
+                options,
+                diagnostics,
+                cli.verbose,
+                cli.dry_run,
+            )
+            .await?
+        }
+        Commands::Repair(options) => {
+            commands::repair::run(
+                runner,
+                &config,
+                options,
+                diagnostics,
+                cli.verbose,
+                cli.dry_run,
+            )
+            .await?
+        }
+        Commands::Unfreeze(options) => {
+            commands::unfreeze::run(
+                runner,
+                &config,
+                options,
+                diagnostics,
+                cli.verbose,
+                cli.dry_run,
+            )
+            .await?
+        }
+        Commands::Status(options) => {
+            commands::status::run(
+                runner,
+                &config,
+                options,
+                diagnostics,
+                cli.verbose,
+                cli.dry_run,
+            )
+            .await?
+        }
+        Commands::Track(options) => {
+            commands::track::run(
+                runner,
+                &config,
+                options,
+                diagnostics,
+                cli.verbose,
+                cli.dry_run,
+            )
+            .await?
+        }
+        Commands::Pr(options) => {
+            commands::pr::run(
+                runner,
+                &config,
+                options,
+                diagnostics,
+                cli.verbose,
+                cli.dry_run,
+            )
+            .await?
+        }
+        Commands::Ui(options) => {
+            commands::ui::run(
+                runner,
+                &config,
+                options,
+                diagnostics,
+                cli.verbose,
+                cli.dry_run,
+            )
+            .await?
+        }
         Commands::External(_) => unreachable!("external subcommands are handled before dispatch"),
     }
 

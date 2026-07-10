@@ -760,7 +760,10 @@ fn merge_recovers_trunk_stranded_by_earlier_failed_push() -> anyhow::Result<()> 
 
     let rebased = repo.change_at(&change.change_id)?;
     let parent = repo.rev_commit_id(&format!("{}-", rebased.commit_id))?;
-    assert_eq!(parent, external, "stack should be rebased onto the external commit");
+    assert_eq!(
+        parent, external,
+        "stack should be rebased onto the external commit"
+    );
     assert_eq!(repo.git_remote_branch_target("main")?, rebased.commit_id);
     assert_eq!(repo.stored_pr(9)?["state"], json!("MERGED"));
     Ok(())

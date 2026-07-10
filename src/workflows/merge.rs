@@ -284,7 +284,8 @@ pub(crate) async fn merge_stack(
         .map_err(|error| phase_error("resolve-stack", revset, error))?;
     if stack.is_empty() {
         if let Some(target) = target {
-            diagnose_empty_targeted_merge(runner, config, target, revset, &frozen_bookmarks).await?;
+            diagnose_empty_targeted_merge(runner, config, target, revset, &frozen_bookmarks)
+                .await?;
         }
         return Ok(summary);
     }
@@ -309,7 +310,8 @@ pub(crate) async fn merge_stack(
         .stack
         .first()
         .with_context(|| format!("phase=resolve-stack object={revset} empty stack"))?;
-    let (_, bottom_pr) = match resolve_merge_pr(runner, config, &context, bottom, diagnostics).await {
+    let (_, bottom_pr) = match resolve_merge_pr(runner, config, &context, bottom, diagnostics).await
+    {
         Ok(resolved) => resolved,
         Err(error) if error.downcast_ref::<MergeSubmitRequired>().is_some() => return Err(error),
         Err(error) => return Err(phase_error("merge-pr-lookup", &bottom.change_id, error)),
@@ -1045,8 +1047,9 @@ pub(crate) async fn cleanup_landed_conflicted_bookmarks(
             continue;
         }
         if diagnostics.dry_run {
-            diagnostics
-                .plan_line(&format!("delete landed conflicted bookmark `{branch}` locally"));
+            diagnostics.plan_line(&format!(
+                "delete landed conflicted bookmark `{branch}` locally"
+            ));
             cleaned += 1;
             continue;
         }
@@ -1068,7 +1071,10 @@ pub(crate) async fn cleanup_landed_conflicted_bookmarks(
 /// (i.e. the change merged). A prefix that no longer resolves is treated as
 /// not-landed so cleanup leaves the bookmark untouched.
 #[tracing::instrument(level = "trace", skip_all)]
-async fn change_landed_in_trunk(runner: &impl CommandRunner, change_id_prefix: &str) -> Result<bool> {
+async fn change_landed_in_trunk(
+    runner: &impl CommandRunner,
+    change_id_prefix: &str,
+) -> Result<bool> {
     let revset = format!("change_id({change_id_prefix}) & ::trunk()");
     let args = ["log", "--no-graph", "-r", &revset, "-T", "\"x\\n\""];
     let output = runner.run("jj", &args).await?;

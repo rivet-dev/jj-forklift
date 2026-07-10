@@ -342,7 +342,11 @@ impl TestRepo {
                 clone.to_str().unwrap(),
             ],
         )?;
-        run_ok_in(&clone, "git", &["config", "user.email", "external@example.com"])?;
+        run_ok_in(
+            &clone,
+            "git",
+            &["config", "user.email", "external@example.com"],
+        )?;
         run_ok_in(&clone, "git", &["config", "user.name", "External User"])?;
         fs::write(clone.join("external.txt"), format!("{name}\n"))?;
         run_ok_in(&clone, "git", &["add", "external.txt"])?;

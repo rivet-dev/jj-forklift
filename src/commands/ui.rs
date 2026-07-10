@@ -30,8 +30,12 @@ pub(crate) async fn run(
     args.extend(options.args.iter().cloned());
 
     if dry_run {
-        let rendered = display_command("jjui", &args.iter().map(String::as_str).collect::<Vec<_>>());
-        ui_progress("Finished", &format!("ui (dry run) — would run `{rendered}`"));
+        let rendered =
+            display_command("jjui", &args.iter().map(String::as_str).collect::<Vec<_>>());
+        ui_progress(
+            "Finished",
+            &format!("ui (dry run) — would run `{rendered}`"),
+        );
         return Ok(());
     }
 

@@ -60,6 +60,11 @@ impl Diagnostics {
         if self.dry_run {
             return;
         }
+        // A `Nothing` action mutated nothing, so it gets no line after the
+        // prompt — only genuinely-changed PRs are worth reporting.
+        if action == SubmitPrAction::Nothing {
+            return;
+        }
         let line = || {
             let message = format!(
                 "PR {} `{}`",
@@ -69,13 +74,7 @@ impl Diagnostics {
                 ),
                 change.title
             );
-            // A `Nothing` action mutated nothing; dim the whole line so the
-            // genuinely-changed PRs stand out against the no-op backdrop.
-            if action == SubmitPrAction::Nothing {
-                ui_progress_muted(action.progress_verb(), &message);
-            } else {
-                ui_progress(action.progress_verb(), &message);
-            }
+            ui_progress(action.progress_verb(), &message);
         };
         if let Some(progress) = progress {
             progress.suspend(line);

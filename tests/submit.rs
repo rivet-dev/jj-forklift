@@ -16,8 +16,7 @@ fn one_change_submit_creates_pr() -> anyhow::Result<()> {
     let output = repo.run(&["submit", "--yes"])?;
     assert_success("submit", &output);
     assert!(
-        stderr_of(&output)
-            .contains("Submitted PR #9 `change title`"),
+        stderr_of(&output).contains("Submitted PR #9 `change title`"),
         "stderr:\n{}",
         stderr_of(&output)
     );
@@ -328,15 +327,12 @@ fn two_change_update_keeps_top_pr_based_on_bottom_branch() -> anyhow::Result<()>
     let output = repo.run(&["submit", "--yes"])?;
     assert_success("update submit", &output);
     assert!(
-        stderr_of(&output).contains(
-            "Updated PR #11 `change 1 title edited`"
-        ),
+        stderr_of(&output).contains("Updated PR #11 `change 1 title edited`"),
         "stderr:\n{}",
         stderr_of(&output)
     );
     assert!(
-        stderr_of(&output)
-            .contains("Updated PR #12 `change 2 title`"),
+        stderr_of(&output).contains("Updated PR #12 `change 2 title`"),
         "stderr:\n{}",
         stderr_of(&output)
     );
@@ -369,10 +365,10 @@ fn noop_submit_skips_push_and_pr_mutation() -> anyhow::Result<()> {
     repo.clear_gh_requests()?;
     let output = repo.run(&["submit", "--yes"])?;
     assert_success("noop submit", &output);
+    // A no-op PR mutates nothing, so it gets no line after the prompt.
     assert!(
-        stderr_of(&output)
-            .contains("Nothing PR #9 `change title`"),
-        "stderr:\n{}",
+        !stderr_of(&output).contains("Nothing PR #9"),
+        "no-op PRs should not print a line\nstderr:\n{}",
         stderr_of(&output)
     );
 
@@ -381,6 +377,42 @@ fn noop_submit_skips_push_and_pr_mutation() -> anyhow::Result<()> {
     assert!(!repo.gh_request_matches(&["api", "-X", "PATCH", "repos/owner/repo/pulls/9"])?);
     // Remote head is unchanged.
     assert_eq!(repo.git_remote_branch_target(&branch)?, pushed);
+    Ok(())
+}
+
+#[test]
+fn submit_plan_omits_number_for_unchanged_pr() -> anyhow::Result<()> {
+    let repo = TestRepo::new("submit-plan-unchanged")?;
+    repo.init_main()?;
+    let changes = repo.create_linear_stack(2)?;
+    let bottom_branch = branch_for("change-1-title", &changes[0].change_id);
+    let top_branch = branch_for("change-2-title", &changes[1].change_id);
+    repo.seed_pr_number(&bottom_branch, 1)?;
+    repo.seed_pr_number(&top_branch, 2)?;
+    assert_success("initial submit", &repo.run(&["submit", "--yes"])?);
+
+    // Edit only the top change so the bottom PR is unchanged on the re-run.
+    repo.write_file("change-2.txt", "change-2\nchange 2 title\nedited\n")?;
+    repo.jj(&[
+        "describe",
+        "-r",
+        &changes[1].change_id,
+        "-m",
+        "change 2 title",
+        "-m",
+        "edited",
+    ])?;
+
+    // Non-interactive submit prints the plan, then stops at the confirmation.
+    let stderr = stderr_of(&repo.run(&["submit"])?);
+    // The unchanged PR carries no number and its description lines up under the
+    // numbered rows; the numbers count only actual changes (update, then sync).
+    assert!(
+        stderr.contains(
+            "actions:\n     unchanged PR #1 `change 1 title`\n  1. update PR #2 `change 2 title`\n  2. sync stack comments"
+        ),
+        "unchanged PR should have no number and stay aligned\nstderr:\n{stderr}"
+    );
     Ok(())
 }
 
@@ -676,7 +708,10 @@ fn submit_rebases_stack_when_trunk_moved() -> anyhow::Result<()> {
         "submit should rebase the stranded stack"
     );
     let parent = repo.rev_commit_id(&format!("{}-", rebased.commit_id))?;
-    assert_eq!(parent, advanced.commit_id, "stack should sit on the new trunk");
+    assert_eq!(
+        parent, advanced.commit_id,
+        "stack should sit on the new trunk"
+    );
     assert_eq!(repo.git_remote_branch_target(&branch)?, rebased.commit_id);
     let pr = repo.stored_pr(9)?;
     assert_eq!(pr["headRefName"], json!(branch));
@@ -773,7 +808,10 @@ fn submit_prompts_to_sync_when_trunk_moved() -> anyhow::Result<()> {
     // Accepting rebased the stack onto the new trunk and pushed the result.
     let rebased = repo.change_at(&change.change_id)?;
     let parent = repo.rev_commit_id(&format!("{}-", rebased.commit_id))?;
-    assert_eq!(parent, advanced.commit_id, "stack should sit on the new trunk");
+    assert_eq!(
+        parent, advanced.commit_id,
+        "stack should sit on the new trunk"
+    );
     assert_eq!(repo.git_remote_branch_target(&branch)?, rebased.commit_id);
     let pr = repo.stored_pr(9)?;
     assert_eq!(pr["headRefName"], json!(branch));

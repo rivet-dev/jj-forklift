@@ -22,24 +22,28 @@ pub(crate) async fn validate_submit_bookmark_state(
     change: &ResolvedChange,
     entry: &PrCacheEntry,
 ) -> Result<()> {
-    let local_target = jj_ref_commit_id(runner, &entry.head_branch).await.with_context(|| {
-        format!(
-            "local head bookmark `{}` is missing or conflicted",
-            entry.head_branch
-        )
-    })?;
+    let local_target = jj_ref_commit_id(runner, &entry.head_branch)
+        .await
+        .with_context(|| {
+            format!(
+                "local head bookmark `{}` is missing or conflicted",
+                entry.head_branch
+            )
+        })?;
     if local_target != change.commit_id {
         // The bookmark may be stranded on a divergent sibling — the same change
         // resolved to a second visible commit (e.g. a duplicate that didn't
         // carry the bookmark). That is safe: the push phase re-points the
         // bookmark onto the selected copy with `jj bookmark set`. Only bail when
         // the bookmark sits on an unrelated change.
-        let local_change_id = jj_ref_change_id(runner, &entry.head_branch).await.with_context(|| {
-            format!(
-                "resolve change id for local head bookmark `{}`",
-                entry.head_branch
-            )
-        })?;
+        let local_change_id = jj_ref_change_id(runner, &entry.head_branch)
+            .await
+            .with_context(|| {
+                format!(
+                    "resolve change id for local head bookmark `{}`",
+                    entry.head_branch
+                )
+            })?;
         if local_change_id != change.change_id {
             bail!(CliError::new(format!(
                 "local head bookmark `{}` points at {} (change {}), but selected change {} is {}",
@@ -106,9 +110,13 @@ pub(crate) async fn build_planning_prefetch(
         .stack
         .iter()
         .filter_map(|change| {
-            store
-                .get_pr(&github.repo, &change.change_id)
-                .map(|entry| (change.change_id.clone(), entry.pr_number, entry.head_branch.clone()))
+            store.get_pr(&github.repo, &change.change_id).map(|entry| {
+                (
+                    change.change_id.clone(),
+                    entry.pr_number,
+                    entry.head_branch.clone(),
+                )
+            })
         })
         .collect::<Vec<_>>();
 
@@ -194,7 +202,11 @@ async fn batch_remote_head_oids(
         return Ok(map);
     }
 
-    let mut args = vec!["ls-remote".to_owned(), "--heads".to_owned(), config.remote.clone()];
+    let mut args = vec![
+        "ls-remote".to_owned(),
+        "--heads".to_owned(),
+        config.remote.clone(),
+    ];
     for branch in branches {
         args.push(format!("refs/heads/{branch}"));
     }
@@ -332,7 +344,8 @@ pub(crate) async fn resolve_submit_cached_head_branch(
         bail!("cache records duplicate head branch `{head_branch}` in stack");
     }
     validate_submit_bookmark_state(runner, config, change, entry).await?;
-    let existing_pr = lookup_cached_pr(runner, github, &change.change_id, &head_branch, entry).await?;
+    let existing_pr =
+        lookup_cached_pr(runner, github, &change.change_id, &head_branch, entry).await?;
     let expected_remote_head = resolve_remote_head(prefetch, runner, config, &head_branch).await?;
     used_head_branches.insert(head_branch.clone());
     Ok((head_branch, Some(existing_pr), expected_remote_head))
@@ -404,7 +417,8 @@ pub(crate) async fn discover_existing_pr_from_local_bookmarks(
         [] => Ok(None),
         [(head_branch, existing_pr)] => {
             validate_submit_bookmark_state(runner, config, change, existing_pr).await?;
-            let expected_remote_head = resolve_remote_head(prefetch, runner, config, head_branch).await?;
+            let expected_remote_head =
+                resolve_remote_head(prefetch, runner, config, head_branch).await?;
             used_head_branches.insert(head_branch.clone());
             Ok(Some((
                 head_branch.clone(),
@@ -770,7 +784,17 @@ pub(crate) async fn submit_stack(
     diagnostics: Diagnostics,
 ) -> Result<SubmitSummary> {
     let planned = plan_submit_stack(runner, config, context, diagnostics).await?;
-    submit_planned(runner, config, context, planned, yes, yes_command, true, diagnostics).await
+    submit_planned(
+        runner,
+        config,
+        context,
+        planned,
+        yes,
+        yes_command,
+        true,
+        diagnostics,
+    )
+    .await
 }
 
 /// Apply an already-resolved [`SubmitPlanned`]: print the plan, confirm, then
@@ -857,9 +881,15 @@ pub(crate) async fn submit_planned(
                 )),
                 Some(existing) if plan.pr_update_needed => Ok((
                     SubmitPrAction::Update,
-                    update_pr(runner, &context.github, existing.pr_number, plan, diagnostics)
-                        .await?
-                        .into_cache_entry(previous_comment_id),
+                    update_pr(
+                        runner,
+                        &context.github,
+                        existing.pr_number,
+                        plan,
+                        diagnostics,
+                    )
+                    .await?
+                    .into_cache_entry(previous_comment_id),
                 )),
                 Some(existing) => Ok((
                     SubmitPrAction::Nothing,
@@ -1374,7 +1404,10 @@ const STACK_TITLE_MAX_CHARS: usize = 60;
 pub(crate) fn truncate_stack_title(title: &str) -> String {
     let title = title.trim();
     let mut chars = title.chars();
-    let head = chars.by_ref().take(STACK_TITLE_MAX_CHARS).collect::<String>();
+    let head = chars
+        .by_ref()
+        .take(STACK_TITLE_MAX_CHARS)
+        .collect::<String>();
     if chars.next().is_some() {
         format!("{} …", head.trim_end())
     } else {
@@ -1645,7 +1678,10 @@ pub(crate) fn validate_submit_descriptions(stack: &[ResolvedChange]) -> Result<(
 /// vec when nothing matches (unlike [`resolve_single_rev`], which requires
 /// exactly one).
 #[tracing::instrument(level = "trace", skip_all, fields(revset = %revset))]
-pub(crate) async fn list_commit_ids(runner: &impl CommandRunner, revset: &str) -> Result<Vec<String>> {
+pub(crate) async fn list_commit_ids(
+    runner: &impl CommandRunner,
+    revset: &str,
+) -> Result<Vec<String>> {
     let template = "commit_id ++ \"\\n\"";
     let args = ["log", "--no-graph", "-r", revset, "-T", template];
     let output = runner.run("jj", &args).await?;
@@ -1666,7 +1702,11 @@ pub(crate) async fn list_commit_ids(runner: &impl CommandRunner, revset: &str) -
 }
 
 #[tracing::instrument(level = "trace", skip_all, fields(left = %left, right = %right))]
-pub(crate) async fn merge_base(runner: &impl CommandRunner, left: &str, right: &str) -> Result<String> {
+pub(crate) async fn merge_base(
+    runner: &impl CommandRunner,
+    left: &str,
+    right: &str,
+) -> Result<String> {
     git_run_required(runner, &["merge-base", left, right])
         .await
         .with_context(|| format!("validate merge base between {left} and {right}"))
@@ -1723,10 +1763,14 @@ pub(crate) async fn reconcile_plans_with_current_commits(
     plans: &mut [SubmitPlan],
 ) -> Result<()> {
     for plan in plans.iter_mut() {
-        let current = list_commit_ids(runner, &format!("change_id({})", plan.change.change_id)).await?;
+        let current =
+            list_commit_ids(runner, &format!("change_id({})", plan.change.change_id)).await?;
         // A plan whose commit is still visible is fine as-is — including the
         // deliberately selected copy of an already-divergent change.
-        if current.iter().any(|commit| *commit == plan.change.commit_id) {
+        if current
+            .iter()
+            .any(|commit| *commit == plan.change.commit_id)
+        {
             continue;
         }
         match current.as_slice() {

@@ -112,7 +112,12 @@ pub(crate) async fn tracked_stack_heads(
     }
     let mut heads = Vec::new();
     let mut seen = HashSet::new();
-    for line in output.stdout.lines().map(str::trim).filter(|line| !line.is_empty()) {
+    for line in output
+        .stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
         let change_id = serde_json::from_str::<String>(line)
             .with_context(|| format!("parse change id from `{line}`"))?;
         if seen.insert(change_id.clone()) {
@@ -282,8 +287,9 @@ pub(crate) async fn sync_stack(
             diagnostics.plan_line("run submit after sync");
             return Ok(submitted);
         }
-        let context = resolve_sync_submit_context(runner, &submit_revset, frozen_refresh, diagnostics)
-            .await?;
+        let context =
+            resolve_sync_submit_context(runner, &submit_revset, frozen_refresh, diagnostics)
+                .await?;
         submit_stack(
             runner,
             config,
@@ -472,7 +478,10 @@ pub(crate) fn prompt_submit_after_sync() -> Result<bool> {
 }
 
 #[tracing::instrument(skip_all, fields(revset = %revset))]
-pub(crate) async fn report_sync_conflicts(runner: &impl CommandRunner, revset: &str) -> Result<usize> {
+pub(crate) async fn report_sync_conflicts(
+    runner: &impl CommandRunner,
+    revset: &str,
+) -> Result<usize> {
     let stack = resolve_stack(runner, revset).await?;
     let conflicts = stack
         .iter()
@@ -511,9 +520,19 @@ pub(crate) async fn sync_refresh_frozen_dependencies(
         .context("resolve GitHub repository for frozen dependencies")?;
     // Fetch every frozen dependency's PR concurrently; ordering is preserved so
     // the stack-shape validation below still sees them bottom-to-top.
-    let prs = stream::iter(stack_resolution.frozen_dependencies.iter().map(|dependency| {
-        fetch_pr_by_number(runner, &github, "sync-frozen", dependency.bookmark.pr_number)
-    }))
+    let prs = stream::iter(
+        stack_resolution
+            .frozen_dependencies
+            .iter()
+            .map(|dependency| {
+                fetch_pr_by_number(
+                    runner,
+                    &github,
+                    "sync-frozen",
+                    dependency.bookmark.pr_number,
+                )
+            }),
+    )
     .buffered(NETWORK_CONCURRENCY)
     .collect::<Vec<_>>()
     .await
@@ -722,7 +741,10 @@ pub(crate) async fn carry_empty_working_copy_to_trunk(
     if *parent == trunk_tip {
         return Ok(());
     }
-    if list_commit_ids(runner, &format!("{parent} & ::{trunk_tip}")).await?.is_empty() {
+    if list_commit_ids(runner, &format!("{parent} & ::{trunk_tip}"))
+        .await?
+        .is_empty()
+    {
         return Ok(());
     }
     if !list_commit_ids(runner, "children(@)").await?.is_empty() {

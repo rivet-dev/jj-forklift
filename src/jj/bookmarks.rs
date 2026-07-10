@@ -173,8 +173,9 @@ pub(crate) async fn resolve_purely_frozen_stack(
                 .resolution("run `forklift get <pr>` first, or move to a mutable stack")
         );
     }
-    let at_commit =
-        resolve_single_rev(runner, "@").await.context("resolve current revision for frozen sync")?;
+    let at_commit = resolve_single_rev(runner, "@")
+        .await
+        .context("resolve current revision for frozen sync")?;
     let frozen_changes = resolve_frozen_changes(runner, frozen_bookmarks).await?;
     if let Some(frozen_dependencies) =
         frozen_dependency_chain_ending_at(runner, &frozen_changes, &at_commit).await?
@@ -185,7 +186,9 @@ pub(crate) async fn resolve_purely_frozen_stack(
         });
     }
 
-    let current = resolve_stack(runner, "@").await.context("resolve current revision for frozen sync")?;
+    let current = resolve_stack(runner, "@")
+        .await
+        .context("resolve current revision for frozen sync")?;
     if let [current] = current.as_slice() {
         if current.empty {
             if let [parent] = current.parent_ids.as_slice() {
@@ -276,12 +279,16 @@ pub(crate) async fn frozen_dependency_chain_ending_at(
         // The next dependency below is the nearest *frozen ancestor*, not the
         // immediate parent: a multi-commit PR puts its own intra-PR commits
         // between its frozen head and the next PR's head.
-        let frozen_parents = nearest_frozen_ancestors(runner, &commit_ids, &current.change.commit_id).await?;
+        let frozen_parents =
+            nearest_frozen_ancestors(runner, &commit_ids, &current.change.commit_id).await?;
         match frozen_parents.as_slice() {
             [] => break,
             [parent] => {
                 current = by_commit.get(parent.as_str()).copied().with_context(|| {
-                    format!("frozen ancestor {} missing from dependency set", short_commit_id(parent))
+                    format!(
+                        "frozen ancestor {} missing from dependency set",
+                        short_commit_id(parent)
+                    )
                 })?;
             }
             parents => {
@@ -289,7 +296,11 @@ pub(crate) async fn frozen_dependency_chain_ending_at(
                     .iter()
                     .filter_map(|commit| by_commit.get(commit.as_str()).copied())
                     .map(|dependency| {
-                        format!("`{}` at {}", dependency.bookmark.name, change_label(&dependency.change))
+                        format!(
+                            "`{}` at {}",
+                            dependency.bookmark.name,
+                            change_label(&dependency.change)
+                        )
                     })
                     .collect::<Vec<_>>()
                     .join(", ");
@@ -341,7 +352,14 @@ async fn nearest_frozen_ancestors(
         .collect::<Vec<_>>()
         .join(" | ");
     let revset = format!("heads(({set}) & ::{head} & ~{head})");
-    let args = ["log", "--no-graph", "-r", &revset, "-T", "commit_id ++ \"\\n\""];
+    let args = [
+        "log",
+        "--no-graph",
+        "-r",
+        &revset,
+        "-T",
+        "commit_id ++ \"\\n\"",
+    ];
     let output = runner.run("jj", &args).await?;
     if !output.success {
         bail!(
@@ -429,12 +447,14 @@ pub(crate) async fn frozen_dependencies_below_owned(
         }
     };
 
-    frozen_dependency_chain_ending_at(runner, &frozen, &boundary).await?.with_context(|| {
-        format!(
-            "frozen boundary {} resolved no dependency chain",
-            short_commit_id(&boundary)
-        )
-    })
+    frozen_dependency_chain_ending_at(runner, &frozen, &boundary)
+        .await?
+        .with_context(|| {
+            format!(
+                "frozen boundary {} resolved no dependency chain",
+                short_commit_id(&boundary)
+            )
+        })
 }
 
 #[tracing::instrument(skip_all, fields(branch = %branch))]
@@ -583,7 +603,8 @@ pub(crate) async fn track_untracked_remote_bookmark_blockers(
     already_tracked_branch: &str,
     diagnostics: Diagnostics,
 ) -> Result<()> {
-    let blockers = untracked_remote_bookmark_blockers(runner, config, rev, already_tracked_branch).await?;
+    let blockers =
+        untracked_remote_bookmark_blockers(runner, config, rev, already_tracked_branch).await?;
     if blockers.is_empty() {
         return Ok(());
     }

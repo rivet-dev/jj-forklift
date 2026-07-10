@@ -323,7 +323,8 @@ pub(crate) async fn print_status_stack_log(
 pub(crate) async fn status_alias_state(runner: &impl CommandRunner) -> Result<StatusAliasState> {
     let frozen_heads = jj_config_optional(runner, JJ_CONFIG_FROZEN_ALIAS_KEY).await?;
     let immutable_heads = Some(jj_config_required(runner, JJ_CONFIG_IMMUTABLE_ALIAS_KEY).await?);
-    let base_immutable_heads = jj_config_optional(runner, JJ_CONFIG_BASE_IMMUTABLE_ALIAS_KEY).await?;
+    let base_immutable_heads =
+        jj_config_optional(runner, JJ_CONFIG_BASE_IMMUTABLE_ALIAS_KEY).await?;
     let actions_needed = match immutable_heads.as_deref() {
         Some(immutable) => plan_startup_config(
             frozen_heads.as_deref(),
