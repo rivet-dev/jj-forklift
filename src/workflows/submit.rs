@@ -831,7 +831,14 @@ pub(crate) async fn submit_planned(
 
     let mut entries = Vec::new();
 
-    let pr_progress = diagnostics.progress_bar("Submitting", "pull requests", plans.len());
+    // Only count PRs that will actually be created or updated. Plans whose PR
+    // already matches the stack (SubmitPrAction::Nothing) do no network work, so
+    // including them would stall the bar at a fraction of its total.
+    let changed_pr_count = plans
+        .iter()
+        .filter(|plan| plan.existing_pr.is_none() || plan.pr_update_needed)
+        .count();
+    let pr_progress = diagnostics.progress_bar("Submitting", "pull requests", changed_pr_count);
     // Create/update every PR concurrently. Each head branch is already on the
     // remote from the push phase above, so GitHub accepts the calls in any
     // order; only the cache writes and progress reporting below stay sequential.
@@ -866,7 +873,8 @@ pub(crate) async fn submit_planned(
     .collect::<Vec<_>>()
     .await;
 
-    for (index, (plan, result)) in plans.into_iter().zip(pr_results).enumerate() {
+    let mut submitted = 0u64;
+    for (plan, result) in plans.into_iter().zip(pr_results) {
         let (action, entry) = result?;
         diagnostics.submit_pr_action(
             &context.github.repo,
@@ -883,8 +891,13 @@ pub(crate) async fn submit_planned(
             diagnostics,
         )?;
         entries.push((plan.change.clone(), entry));
-        if let Some(progress) = &pr_progress {
-            progress.set_position((index + 1) as u64);
+        // Advance only for PRs that were actually submitted or updated so the
+        // bar tracks the network work reflected in its total.
+        if action != SubmitPrAction::Nothing {
+            submitted += 1;
+            if let Some(progress) = &pr_progress {
+                progress.set_position(submitted);
+            }
         }
     }
     if let Some(progress) = pr_progress {
