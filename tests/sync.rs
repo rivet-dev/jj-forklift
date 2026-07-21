@@ -446,6 +446,42 @@ fn sync_carries_empty_working_copy_onto_moved_trunk() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Regression: an empty `@` on trunk with a leftover frozen bookmark that is not
+/// below the working copy (e.g. a stale `forklift get` from an abandoned import)
+/// must not abort sync. There is nothing owned to sync, so sync should advance
+/// trunk and carry the empty working copy rather than erroring on the
+/// out-of-scope frozen bookmark.
+#[test]
+fn sync_ignores_stale_frozen_bookmark_not_below_working_copy() -> anyhow::Result<()> {
+    let repo = TestRepo::new("sync-stale-frozen-ignored")?;
+    repo.init_main()?;
+    // A leftover frozen bookmark pointing at a commit off to the side of trunk,
+    // never cleaned up after its stack was abandoned.
+    let stale = repo.create_change("stale", "stale title", "stale body")?;
+    repo.set_bookmark("forklift/frozen/pr-99", &stale.commit_id)?;
+
+    // Return to a fresh empty `@` on trunk: nothing owned is in flight.
+    repo.jj(&["new", "main"])?;
+    let wc_before = repo.change_at("@")?;
+    let advanced = repo.advance_remote_trunk_externally("remote work")?;
+
+    let output = repo.run(&["sync"])?;
+    assert_success("sync", &output);
+
+    // Trunk moved to the remote tip and the empty working copy moved with it.
+    assert_eq!(repo.bookmark_target("main")?, advanced);
+    let wc_after = repo.change_at("@")?;
+    assert_eq!(wc_after.change_id, wc_before.change_id);
+    let parent = repo.rev_commit_id(&format!("{}-", wc_after.commit_id))?;
+    assert_eq!(parent, advanced, "working copy should sit on the new trunk");
+    // The out-of-scope frozen bookmark is left untouched.
+    assert_eq!(
+        repo.bookmark_target("forklift/frozen/pr-99")?,
+        stale.commit_id
+    );
+    Ok(())
+}
+
 #[test]
 fn sync_leaves_empty_working_copy_on_rebased_stack_top() -> anyhow::Result<()> {
     let repo = TestRepo::new("sync-empty-wc-on-stack")?;

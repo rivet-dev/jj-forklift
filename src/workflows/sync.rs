@@ -176,34 +176,44 @@ pub(crate) async fn sync_stack(
                 .map_err(|error| phase_error("resolve-stack", revset, error))?;
         }
     }
-    // Nothing left to sync (e.g. the whole stack just merged). Move trunk to the
-    // fetched remote tip and finish, reporting any branches we cleaned up rather
-    // than failing on the empty stack.
-    if stack.is_empty() && frozen_bookmarks.is_empty() {
-        diagnostics.phase("move-trunk");
-        move_trunk_to_remote(runner, config, diagnostics)
-            .await
-            .map_err(|error| phase_error("move-trunk", &config.trunk, error))?;
-        carry_empty_working_copy_to_trunk(runner, config, diagnostics)
-            .await
-            .map_err(|error| phase_error("carry-working-copy", "@", error))?;
-        return Ok(SyncSummary {
-            rebased_roots: 0,
-            submit_ran: false,
-            cleaned_branches,
-            pruned_duplicates,
-            conflicts: 0,
-        });
-    }
+    // An empty owned stack is a "purely frozen" stack only when the working copy
+    // actually sits atop a frozen dependency chain. When nothing is owned and `@`
+    // is not on such a chain, there is nothing to sync: this covers the whole
+    // stack having just merged, an empty `@` on trunk with no frozen bookmarks,
+    // and an empty `@` on trunk whose only frozen bookmarks are unrelated or
+    // stale ones elsewhere in the repo. Move trunk to the fetched remote tip,
+    // carry the empty working copy, and finish rather than erroring on the empty
+    // stack or on out-of-scope frozen bookmarks.
     let stack_resolution = if stack.is_empty() {
-        resolve_purely_frozen_stack(runner, frozen_bookmarks).await
+        match resolve_purely_frozen_stack(runner, frozen_bookmarks)
+            .await
+            .map_err(|error| phase_error("resolve-stack", revset, error))?
+        {
+            Some(resolution) => resolution,
+            None => {
+                diagnostics.phase("move-trunk");
+                move_trunk_to_remote(runner, config, diagnostics)
+                    .await
+                    .map_err(|error| phase_error("move-trunk", &config.trunk, error))?;
+                carry_empty_working_copy_to_trunk(runner, config, diagnostics)
+                    .await
+                    .map_err(|error| phase_error("carry-working-copy", "@", error))?;
+                return Ok(SyncSummary {
+                    rebased_roots: 0,
+                    submit_ran: false,
+                    cleaned_branches,
+                    pruned_duplicates,
+                    conflicts: 0,
+                });
+            }
+        }
     } else {
         match validate_stack_shape(runner, &stack, revset).await {
             Ok(()) => resolve_stack_resolution(runner, stack, frozen_bookmarks).await,
             Err(error) => Err(error),
         }
-    }
-    .map_err(|error| phase_error("resolve-stack", revset, error))?;
+        .map_err(|error| phase_error("resolve-stack", revset, error))?
+    };
     if diagnostics.verbose {
         print_stack(&stack_resolution.owned);
     }

@@ -163,15 +163,20 @@ pub(crate) async fn resolve_stack_resolution(
     Ok(resolution)
 }
 
+/// Resolve a stack with no owned changes as a purely frozen stack. Returns
+/// `Some` only when the working copy actually sits atop a frozen dependency
+/// chain (either directly on a frozen head or as its empty child). Returns
+/// `None` when there is nothing in scope to sync: no frozen bookmarks at all,
+/// or frozen bookmarks that exist elsewhere in the repo but are not below the
+/// working copy (e.g. an empty `@` on trunk with only unrelated or stale frozen
+/// bookmarks left over from an earlier `forklift get`). The caller treats `None`
+/// as a no-op sync that just advances trunk.
 pub(crate) async fn resolve_purely_frozen_stack(
     runner: &impl CommandRunner,
     frozen_bookmarks: Vec<FrozenBookmark>,
-) -> Result<StackResolution> {
+) -> Result<Option<StackResolution>> {
     if frozen_bookmarks.is_empty() {
-        bail!(
-            CliError::new("empty owned stack and no frozen bookmarks in scope")
-                .resolution("run `forklift get <pr>` first, or move to a mutable stack")
-        );
+        return Ok(None);
     }
     let at_commit = resolve_single_rev(runner, "@")
         .await
@@ -180,10 +185,10 @@ pub(crate) async fn resolve_purely_frozen_stack(
     if let Some(frozen_dependencies) =
         frozen_dependency_chain_ending_at(runner, &frozen_changes, &at_commit).await?
     {
-        return Ok(StackResolution {
+        return Ok(Some(StackResolution {
             owned: Vec::new(),
             frozen_dependencies,
-        });
+        }));
     }
 
     let current = resolve_stack(runner, "@")
@@ -195,20 +200,16 @@ pub(crate) async fn resolve_purely_frozen_stack(
                 if let Some(frozen_dependencies) =
                     frozen_dependency_chain_ending_at(runner, &frozen_changes, parent).await?
                 {
-                    return Ok(StackResolution {
+                    return Ok(Some(StackResolution {
                         owned: Vec::new(),
                         frozen_dependencies,
-                    });
+                    }));
                 }
             }
         }
     };
 
-    bail!(CliError::new(format!(
-        "empty owned stack and current revision {} is not a `forklift/frozen/pr-*` bookmark target or empty child of one",
-        short_commit_id(&at_commit)
-    ))
-    .resolution("run `forklift get <pr>` first, or move to a mutable stack"));
+    Ok(None)
 }
 
 pub(crate) async fn resolve_frozen_changes(
