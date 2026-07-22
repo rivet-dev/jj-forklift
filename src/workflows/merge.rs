@@ -1597,15 +1597,17 @@ pub(crate) fn validate_pr_ready_for_merge(
     Ok(())
 }
 
-/// Require every reported status check to pass before a direct squash merge.
+/// Require the latest reported status check per workflow/name to pass before a
+/// direct squash merge.
 ///
-/// Note: `statusCheckRollup` reports *all* checks on the PR, not only the ones
-/// branch protection marks as required. This intentionally fails closed — any
-/// failing or pending check blocks the merge — so the messages say "checks",
-/// not "required checks", to avoid implying we consulted branch protection.
+/// Note: `statusCheckRollup` reports checks on the PR, not only the ones branch
+/// protection marks as required. It can also retain superseded runs after
+/// GitHub Actions concurrency cancellation. Fail closed on the effective latest
+/// result for each check identity, so a stale cancelled run does not block a
+/// newer successful run for the same workflow/name.
 #[tracing::instrument(skip_all, fields(pr = pr_number))]
 pub(crate) fn validate_status_checks(pr_number: u64, checks: &[serde_json::Value]) -> Result<()> {
-    for check in checks {
+    for check in crate::effective_status_checks(checks) {
         let name = check_name(check);
         if let Some(state) = check.get("state").and_then(serde_json::Value::as_str) {
             if state != "SUCCESS" {

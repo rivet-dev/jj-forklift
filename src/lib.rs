@@ -14,6 +14,52 @@ pub fn tracked_stacks_revset(branch_prefix: &str) -> String {
     )
 }
 
+pub fn effective_status_checks(checks: &[serde_json::Value]) -> Vec<&serde_json::Value> {
+    let mut effective = Vec::<&serde_json::Value>::new();
+    for check in checks {
+        let identity = check_identity(check);
+        let timestamp = check_timestamp(check);
+        if let Some(existing_index) = effective
+            .iter()
+            .position(|existing| check_identity(existing) == identity)
+        {
+            let existing_timestamp = check_timestamp(effective[existing_index]);
+            let replace = match (timestamp, existing_timestamp) {
+                (Some(new), Some(old)) => new >= old,
+                (Some(_), None) => true,
+                (None, Some(_)) => false,
+                (None, None) => true,
+            };
+            if replace {
+                effective[existing_index] = check;
+            }
+        } else {
+            effective.push(check);
+        }
+    }
+    effective
+}
+
+fn check_identity(check: &serde_json::Value) -> String {
+    let workflow = check
+        .get("workflowName")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let name = check
+        .get("name")
+        .or_else(|| check.get("context"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("<unknown>");
+    format!("{workflow}\t{name}")
+}
+
+fn check_timestamp(check: &serde_json::Value) -> Option<&str> {
+    check
+        .get("startedAt")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| check.get("completedAt").and_then(serde_json::Value::as_str))
+}
+
 pub fn empty_string_to_none<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
