@@ -1004,6 +1004,15 @@ def pr_view(state, pr):
         "autoMergeRequest": None,
     }
 
+def rest_pr_view(state, pr):
+    """`gh api repos/{owner}/{repo}/pulls/{n}` speaks REST, not GraphQL: state is
+    only ever lowercase open/closed and a merged PR reports closed plus
+    merged=true. Reproduce that faithfully so REST callers are exercised against
+    the shape real GitHub returns."""
+    view = pr_view(state, pr)
+    view["state"] = "open" if view["state"].upper() == "OPEN" else "closed"
+    return view
+
 def pr_list_view(state, pr):
     view = pr_view(state, pr)
     # Match `gh pr list --json headRepository`: the list endpoint does not
@@ -1097,7 +1106,7 @@ if args[:1] == ["api"] and len(args) >= 2 \
     if pr is None:
         print("not found", file=sys.stderr)
         sys.exit(1)
-    print(json.dumps(pr_view(state, pr)))
+    print(json.dumps(rest_pr_view(state, pr)))
     sys.exit(0)
 
 # List issue comments: `api --paginate repos/owner/repo/issues/<n>/comments`.
@@ -1126,7 +1135,7 @@ if args[:3] == ["api", "-X", "POST"] and args[3] == "repos/owner/repo/pulls":
     }
     state["prs"].append(pr)
     save_state(state)
-    print(json.dumps(pr_view(state, pr)))
+    print(json.dumps(rest_pr_view(state, pr)))
     sys.exit(0)
 
 # Update a PR (retarget/title/body).
@@ -1141,7 +1150,7 @@ if args[:3] == ["api", "-X", "PATCH"] and args[3].startswith("repos/owner/repo/p
     pr["title"] = values.get("title", pr.get("title", ""))
     pr["body"] = values.get("body", pr.get("body", ""))
     save_state(state)
-    print(json.dumps(pr_view(state, pr)))
+    print(json.dumps(rest_pr_view(state, pr)))
     sys.exit(0)
 
 # Create an issue comment.

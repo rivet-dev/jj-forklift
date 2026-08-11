@@ -671,6 +671,56 @@ fn sync_unfreeze_rebases_frozen_dependency_onto_new_trunk() -> anyhow::Result<()
     Ok(())
 }
 
+/// Regression: a frozen dependency whose PR has landed must be dropped so the
+/// owned stack rebases straight onto trunk. The REST endpoint reports a merged
+/// PR as `closed` with `merged: true`, which sync previously read as
+/// closed-unmerged and refused to recover from.
+#[test]
+fn sync_drops_merged_frozen_dependency_and_rebases_onto_trunk() -> anyhow::Result<()> {
+    let repo = TestRepo::new("sync-merged-frozen-dep")?;
+    let base_trunk = repo.init_main()?;
+
+    // A frozen upstream dependency (a teammate's imported PR) at the base.
+    let dep = repo.create_change("dep", "dep title", "dep body")?;
+    let dep_branch = branch_for("dep-title", &dep.change_id);
+    repo.set_bookmark(&dep_branch, &dep.commit_id)?;
+    repo.push_bookmark(&dep_branch)?;
+    repo.seed_pr(11, &dep_branch, "main", "dep title", "dep body")?;
+    repo.set_bookmark("forklift/frozen/pr-11", &dep.commit_id)?;
+
+    // Your own change stacked on top of the frozen dependency.
+    let mine = repo.create_change("mine", "mine title", "mine body")?;
+
+    // The dependency lands: remote trunk fast-forwards onto its head, while the
+    // local trunk bookmark stays behind so sync has something to move.
+    repo.set_bookmark("main", &dep.commit_id)?;
+    repo.push_bookmark("main")?;
+    repo.jj(&[
+        "bookmark",
+        "set",
+        "--allow-backwards",
+        "main",
+        "-r",
+        &base_trunk.commit_id,
+    ])?;
+    repo.jj(&["edit", &mine.change_id])?;
+    repo.set_pr_state(11, "MERGED")?;
+    repo.set_pr_merged(11, true)?;
+
+    let output = repo.run(&["sync"])?;
+    assert_success("sync with a merged frozen dependency", &output);
+
+    // The owned change sits directly on the landed trunk, not on a stale copy of
+    // the dependency.
+    let rebased_mine = repo.change_at(&mine.change_id)?;
+    let mine_parent = repo.rev_commit_id(&format!("{}-", rebased_mine.commit_id))?;
+    assert_eq!(
+        mine_parent, dep.commit_id,
+        "the owned change should be rebased onto the merged dependency's trunk commit"
+    );
+    Ok(())
+}
+
 #[test]
 fn sync_is_best_effort_across_stacks_when_one_fails() -> anyhow::Result<()> {
     let repo = TestRepo::new("sync-best-effort")?;

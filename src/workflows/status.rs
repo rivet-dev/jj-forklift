@@ -375,9 +375,7 @@ pub(crate) async fn status_frozen_dependencies(
                         pr.number,
                         pr.head_ref_oid
                     ))
-                } else if !pr.state.eq_ignore_ascii_case("OPEN")
-                    && !pr.state.eq_ignore_ascii_case("MERGED")
-                {
+                } else if !pr.state.eq_ignore_ascii_case("OPEN") && !pr_was_merged(&pr) {
                     Some(format!(
                         "frozen dependency `{}` PR #{} is `{}`; run `forklift sync`",
                         dependency.bookmark.name, pr.number, pr.state

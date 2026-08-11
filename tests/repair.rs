@@ -49,7 +49,7 @@ fn repair_prunes_merged_pr_from_stale_stack_comment() -> anyhow::Result<()> {
         "stale get should fail before repair"
     );
     assert!(
-        stderr_of(&get_before).contains("PR #5 is CLOSED"),
+        stderr_of(&get_before).contains("PR #5 is MERGED"),
         "stderr:\n{}",
         stderr_of(&get_before)
     );

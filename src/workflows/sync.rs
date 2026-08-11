@@ -585,10 +585,7 @@ pub(crate) fn validate_sync_frozen_pr_stack(
         );
     }
 
-    let merged_count = prs
-        .iter()
-        .filter(|pr| pr.state.eq_ignore_ascii_case("MERGED"))
-        .count();
+    let merged_count = prs.iter().filter(|pr| pr_was_merged(pr)).count();
     if merged_count == prs.len() {
         return Ok(false);
     }

@@ -694,8 +694,10 @@ pub(crate) async fn fetch_pr_by_number(
         );
     }
 
-    serde_json::from_str(&output.stdout)
-        .with_context(|| format!("parse GitHub PR #{} metadata", pr_number_string))
+    let mut pr: GhPr = serde_json::from_str(&output.stdout)
+        .with_context(|| format!("parse GitHub PR #{} metadata", pr_number_string))?;
+    normalize_rest_pr_state(&mut pr);
+    Ok(pr)
 }
 
 #[tracing::instrument(skip_all, fields(change = %change_id, head_branch = %head_branch))]
@@ -763,6 +765,23 @@ pub(crate) async fn lookup_open_pr_by_head_branch(
             prs.len()
         ))),
     }
+}
+
+/// Rewrite a REST `state` into the GraphQL vocabulary the rest of the codebase
+/// compares against.
+///
+/// `gh pr view`/`gh pr list` (GraphQL) report `OPEN`, `CLOSED`, or `MERGED`,
+/// but `gh api repos/{owner}/{repo}/pulls/{n}` (REST) only ever reports `open`
+/// or `closed` and carries the merge outcome in a separate `merged` boolean. A
+/// merged PR therefore arrives as `closed`, which reads as closed-unmerged to
+/// every `state` comparison. Normalize once at the fetch boundary so both
+/// sources speak the same vocabulary.
+pub(crate) fn normalize_rest_pr_state(pr: &mut GhPr) {
+    pr.state = if pr.merged {
+        "MERGED".to_owned()
+    } else {
+        pr.state.to_uppercase()
+    };
 }
 
 #[derive(Debug, Clone, Deserialize)]

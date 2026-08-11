@@ -80,6 +80,8 @@ pub(crate) async fn run_pr_api(
         );
     }
 
-    serde_json::from_str(&output.stdout)
-        .with_context(|| format!("parse GitHub PR response while trying to {action} {change_id}"))
+    let mut pr: GhPr = serde_json::from_str(&output.stdout)
+        .with_context(|| format!("parse GitHub PR response while trying to {action} {change_id}"))?;
+    normalize_rest_pr_state(&mut pr);
+    Ok(pr)
 }
