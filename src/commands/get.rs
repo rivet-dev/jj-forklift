@@ -14,6 +14,7 @@ pub(crate) async fn run(
         &config,
         &options.target,
         !options.no_edit,
+        options.force,
         diagnostics,
     )
     .await?;

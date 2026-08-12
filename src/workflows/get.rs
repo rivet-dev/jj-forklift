@@ -6,6 +6,7 @@ pub(crate) async fn get_stack(
     config: &AppConfig,
     target: &str,
     auto_edit: bool,
+    force: bool,
     diagnostics: Diagnostics,
 ) -> Result<GetSummary> {
     diagnostics.phase("resolve-github");
@@ -74,7 +75,7 @@ pub(crate) async fn get_stack(
     let target_frozen = frozen_bookmark_name(target_pr_number);
     let next_command = format!("jj new {target_frozen}");
     if diagnostics.dry_run {
-        update_get_frozen_bookmarks(runner, &prs, diagnostics).await?;
+        update_get_frozen_bookmarks(runner, &prs, force, diagnostics).await?;
         if auto_edit {
             diagnostics.plan_line(&format!("move working copy: {next_command}"));
         } else {
@@ -99,7 +100,7 @@ pub(crate) async fn get_stack(
         .map_err(|error| phase_error("resolve-fetched-heads", "fetched PR heads", error))?;
 
     diagnostics.phase("freeze-stack");
-    update_get_frozen_bookmarks(runner, &prs, diagnostics)
+    update_get_frozen_bookmarks(runner, &prs, force, diagnostics)
         .await
         .map_err(|error| phase_error("freeze-stack", "frozen bookmarks", error))?;
 

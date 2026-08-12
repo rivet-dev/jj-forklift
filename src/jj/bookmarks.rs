@@ -4,6 +4,7 @@ use super::*;
 pub(crate) async fn update_get_frozen_bookmarks(
     runner: &impl CommandRunner,
     prs: &[GhPr],
+    force: bool,
     diagnostics: Diagnostics,
 ) -> Result<()> {
     if diagnostics.dry_run {
@@ -26,6 +27,7 @@ pub(crate) async fn update_get_frozen_bookmarks(
         if let Some(bookmark) = existing.get(&pr.number)
             && bookmark.commit_id != pr.head_ref_oid
             && !git_commit_is_ancestor(runner, &bookmark.commit_id, &pr.head_ref_oid).await?
+            && !confirm_overwrite_diverged_frozen_bookmark(bookmark, pr, force)?
         {
             bail!(
                 CliError::new(format!(
@@ -36,7 +38,7 @@ pub(crate) async fn update_get_frozen_bookmarks(
                     short_commit_id(&pr.head_ref_oid)
                 ))
                 .resolution(
-                    "delete or move the frozen bookmark manually after inspecting the rewrite"
+                    "delete or move the frozen bookmark manually after inspecting the rewrite, or re-run with --force to overwrite it with the fetched head"
                 )
             );
         }
@@ -44,9 +46,12 @@ pub(crate) async fn update_get_frozen_bookmarks(
 
     for pr in prs {
         let bookmark = frozen_bookmark_name(pr.number);
+        // `--allow-backwards`: normal refreshes fast-forward, but an approved
+        // overwrite of a rewritten-upstream PR moves the snapshot sideways.
         let args = [
             "bookmark",
             "set",
+            "--allow-backwards",
             bookmark.as_str(),
             "-r",
             pr.head_ref_oid.as_str(),
@@ -63,6 +68,51 @@ pub(crate) async fn update_get_frozen_bookmarks(
     }
 
     Ok(())
+}
+
+/// Decide whether to overwrite a frozen bookmark whose PR was rewritten upstream.
+/// `Ok(true)` overwrites with the fetched head, `Ok(false)` aborts with the
+/// manual-resolution error. `--force` skips the prompt; a non-interactive run
+/// without `--force` never moves the bookmark implicitly.
+fn confirm_overwrite_diverged_frozen_bookmark(
+    bookmark: &FrozenBookmark,
+    pr: &GhPr,
+    force: bool,
+) -> Result<bool> {
+    ui_warn!(
+        "PR #{} was rewritten upstream: frozen bookmark `{}` at {} is not an ancestor of the fetched head {}",
+        pr.number,
+        bookmark.name,
+        short_commit_id(&bookmark.commit_id),
+        short_commit_id(&pr.head_ref_oid)
+    );
+
+    if force {
+        ui_warn!(
+            "--force: overwriting `{}` with the fetched head {}",
+            bookmark.name,
+            short_commit_id(&pr.head_ref_oid)
+        );
+        return Ok(true);
+    }
+    if !io::stdin().is_terminal() {
+        // Never move a frozen snapshot implicitly in a scripted/CI run.
+        return Ok(false);
+    }
+
+    eprint!(
+        "Overwrite `{}` with the fetched head {}? [y/N] ",
+        bookmark.name,
+        short_commit_id(&pr.head_ref_oid)
+    );
+    io::stderr()
+        .flush()
+        .context("flush frozen bookmark overwrite prompt")?;
+    let mut answer = String::new();
+    io::stdin()
+        .read_line(&mut answer)
+        .context("read frozen bookmark overwrite confirmation")?;
+    Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "YES" | "Yes"))
 }
 
 #[tracing::instrument(level = "trace", skip_all, fields(pr = pr_number))]

@@ -134,6 +134,13 @@ pub(crate) struct GetOptions {
     /// Do not move the working copy to a new editable change after fetching.
     #[arg(short = 'E', long)]
     pub(crate) no_edit: bool,
+
+    /// Overwrite a frozen bookmark whose PR was rewritten upstream (its frozen
+    /// commit is no longer an ancestor of the fetched head) with the remote
+    /// head, instead of prompting. Also required to overwrite in non-interactive
+    /// runs, where forklift otherwise aborts rather than move the bookmark.
+    #[arg(short, long)]
+    pub(crate) force: bool,
 }
 
 #[derive(Debug, Args)]

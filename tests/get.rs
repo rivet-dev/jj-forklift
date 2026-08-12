@@ -226,3 +226,59 @@ fn get_lands_working_copy_on_targeted_mid_stack_pr() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn get_force_overwrites_diverged_frozen_bookmark() -> anyhow::Result<()> {
+    let repo = TestRepo::new("get-force-diverged")?;
+    repo.init_main()?;
+    let imported = repo.create_change("imported", "imported title", "imported body")?;
+    let branch = branch_for("imported-title", &imported.change_id);
+    repo.set_bookmark(&branch, "@")?;
+    repo.push_bookmark(&branch)?;
+    repo.seed_pr(11, &branch, "main", "imported title", "imported body")?;
+
+    // First get freezes pr-11 at the original head.
+    let output = repo.run(&["get", "11", "--no-edit"])?;
+    assert_success("get 11", &output);
+    assert_eq!(
+        repo.bookmark_target("forklift/frozen/pr-11")?,
+        imported.commit_id
+    );
+
+    // Rewrite the PR upstream: point its branch at a sibling of the frozen head
+    // (so the frozen commit is no longer an ancestor) and force-push it.
+    repo.jj(&["new", "main"])?;
+    repo.write_file("rewritten.txt", "rewritten\n")?;
+    repo.jj(&["describe", "-m", "rewritten title"])?;
+    let rewritten = repo.rev_commit_id("@")?;
+    repo.jj(&["bookmark", "set", "--allow-backwards", &branch, "-r", "@"])?;
+    repo.push_bookmark(&branch)?;
+
+    // Without --force, a non-interactive run aborts rather than move the snapshot.
+    let blocked = repo.run(&["get", "11", "--no-edit"])?;
+    assert!(
+        !blocked.status.success(),
+        "diverged frozen bookmark should block get without --force\nstderr:\n{}",
+        stderr_of(&blocked)
+    );
+    let stderr = stderr_of(&blocked);
+    assert!(
+        stderr.contains("was rewritten upstream"),
+        "stderr should explain the divergence:\n{stderr}"
+    );
+    assert_eq!(
+        repo.bookmark_target("forklift/frozen/pr-11")?,
+        imported.commit_id,
+        "the blocked run must leave the frozen bookmark untouched"
+    );
+
+    // --force overwrites the frozen bookmark with the fetched head.
+    let forced = repo.run(&["get", "11", "--no-edit", "--force"])?;
+    assert_success("get 11 --force", &forced);
+    assert_eq!(
+        repo.bookmark_target("forklift/frozen/pr-11")?,
+        rewritten,
+        "--force should move the frozen bookmark to the rewritten head"
+    );
+    Ok(())
+}

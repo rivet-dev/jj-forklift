@@ -589,7 +589,9 @@ pub(crate) async fn sync_refresh_frozen_dependencies(
     fetch_get_branches(runner, config, &prs, diagnostics)
         .await
         .map_err(|error| anyhow!("fetch frozen dependency branches: {error}"))?;
-    update_get_frozen_bookmarks(runner, &prs, diagnostics).await?;
+    // Sync has no --force of its own; on a diverged frozen dependency it prompts
+    // in a tty and otherwise aborts, never moving the snapshot implicitly.
+    update_get_frozen_bookmarks(runner, &prs, false, diagnostics).await?;
     Ok(SyncFrozenRefresh {
         github: Some(github),
         active_dependencies: true,
