@@ -559,6 +559,33 @@ pub(crate) async fn delete_bookmark(
     Ok(())
 }
 
+/// Flush pending jj bookmark changes into the colocated git repo. A plain
+/// `jj bookmark delete` only marks the bookmark deleted; the `refs/heads/*` ref
+/// lingers until the next export, and jj keeps surfacing it as `(deleted)`.
+/// Callers that delete bookmarks and need them gone from git — e.g. frozen
+/// bookmark cleanup — export explicitly so a later `jj bookmark list` no longer
+/// resolves the stale name.
+pub(crate) async fn git_export(
+    runner: &impl CommandRunner,
+    diagnostics: Diagnostics,
+) -> Result<()> {
+    let args = ["git", "export"];
+    if diagnostics.dry_run {
+        diagnostics.plan_line(&format!("{}", display_command("jj", &args)));
+        return Ok(());
+    }
+    diagnostics.command("jj", &args);
+    let output = runner.run("jj", &args).await?;
+    if !output.success {
+        bail!(
+            "failed-command=`{}` error={}",
+            display_command("jj", &args),
+            output.stderr.trim()
+        );
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RemoteBookmark {
     pub(crate) name: String,

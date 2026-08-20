@@ -753,6 +753,64 @@ fn sync_drops_merged_frozen_dependency_and_rebases_onto_trunk() -> anyhow::Resul
     Ok(())
 }
 
+/// Regression: once a frozen dependency's PR merges, its commit lands on trunk
+/// and the ancestry-based frozen discovery keeps re-selecting it, so the submit
+/// that sync runs rejects it for being MERGED — a loop sync could not escape.
+/// Sync must prune the merged frozen bookmark up front so the follow-up submit
+/// sees no frozen dependency.
+#[test]
+fn sync_prunes_merged_frozen_bookmark_so_submit_succeeds() -> anyhow::Result<()> {
+    let repo = TestRepo::new("sync-prune-merged-frozen")?;
+    let base_trunk = repo.init_main()?;
+
+    // A frozen upstream dependency (a teammate's imported PR) at the base.
+    let dep = repo.create_change("dep", "dep title", "dep body")?;
+    let dep_branch = branch_for("dep-title", &dep.change_id);
+    repo.set_bookmark(&dep_branch, &dep.commit_id)?;
+    repo.push_bookmark(&dep_branch)?;
+    repo.seed_pr(11, &dep_branch, "main", "dep title", "dep body")?;
+    repo.set_bookmark("forklift/frozen/pr-11", &dep.commit_id)?;
+
+    // Your own change stacked on top of the frozen dependency.
+    let mine = repo.create_change("mine", "mine title", "mine body")?;
+
+    // The dependency lands: remote trunk fast-forwards onto its head while the
+    // local trunk bookmark stays behind so sync has something to move.
+    repo.set_bookmark("main", &dep.commit_id)?;
+    repo.push_bookmark("main")?;
+    repo.jj(&[
+        "bookmark",
+        "set",
+        "--allow-backwards",
+        "main",
+        "-r",
+        &base_trunk.commit_id,
+    ])?;
+    repo.jj(&["edit", &mine.change_id])?;
+    repo.set_pr_state(11, "MERGED")?;
+    repo.set_pr_merged(11, true)?;
+
+    let output = repo.run(&["sync"])?;
+    assert_success("sync with a merged frozen dependency", &output);
+
+    // The stale frozen bookmark is pruned rather than left to be re-discovered.
+    assert!(
+        !repo.bookmark_exists("forklift/frozen/pr-11")?,
+        "merged frozen bookmark should be pruned by sync:\n{}",
+        stderr_of(&output)
+    );
+
+    // The follow-up submit no longer trips over the merged dependency.
+    let submit = repo.run(&["submit", "--dry-run"])?;
+    assert_success("submit after pruning merged frozen dependency", &submit);
+    assert!(
+        !stderr_of(&submit).contains("reports state MERGED"),
+        "submit must not reject a pruned merged frozen dependency:\n{}",
+        stderr_of(&submit)
+    );
+    Ok(())
+}
+
 #[test]
 fn sync_is_best_effort_across_stacks_when_one_fails() -> anyhow::Result<()> {
     let repo = TestRepo::new("sync-best-effort")?;

@@ -148,6 +148,13 @@ pub(crate) async fn sync_stack(
         .await
         .map_err(|error| phase_error("cleanup-merged", "branches", error))?;
 
+    // Prune frozen bookmarks whose PR has merged before resolving the stack, so
+    // their now-in-trunk merge commits are not re-discovered as frozen
+    // dependencies (which submit would then reject for being MERGED).
+    cleanup_merged_frozen_bookmarks(runner, diagnostics)
+        .await
+        .map_err(|error| phase_error("cleanup-merged", "frozen bookmarks", error))?;
+
     diagnostics.phase("resolve-stack");
     resolve_single_rev(runner, "trunk()")
         .await
@@ -395,6 +402,65 @@ async fn finish_sync_at_trunk(
         pruned_duplicates,
         conflicts: 0,
     })
+}
+
+/// Delete frozen bookmarks whose PR has merged. Once a frozen dependency lands,
+/// its merge commit becomes an ancestor of trunk, so the ancestry-based frozen
+/// discovery in `frozen_dependencies_below_owned` keeps re-selecting it and the
+/// submit that follows rejects it for being MERGED — a loop sync cannot escape.
+/// Pruning the stale bookmark here breaks it. Local-only and best-effort: a PR
+/// lookup that fails leaves its bookmark untouched, and every deletion is
+/// undoable via `jj op undo`.
+#[tracing::instrument(skip_all)]
+pub(crate) async fn cleanup_merged_frozen_bookmarks(
+    runner: &impl CommandRunner,
+    diagnostics: Diagnostics,
+) -> Result<usize> {
+    let frozen = frozen_bookmarks(runner).await?;
+    if frozen.is_empty() {
+        return Ok(0);
+    }
+    let github = GitHubContext::resolve(runner)
+        .await
+        .context("resolve GitHub repository for merged frozen-bookmark cleanup")?;
+    // Fetch each frozen bookmark's PR concurrently; ordering is preserved so the
+    // per-bookmark deletion below stays deterministic.
+    let prs = stream::iter(frozen.iter().map(|bookmark| {
+        fetch_pr_by_number(runner, &github, "cleanup-frozen", bookmark.pr_number)
+    }))
+    .buffered(NETWORK_CONCURRENCY)
+    .collect::<Vec<_>>()
+    .await;
+
+    let mut deleted = 0;
+    for (bookmark, pr) in frozen.iter().zip(prs) {
+        let pr = match pr {
+            Ok(pr) => pr,
+            Err(error) => {
+                diagnostics.warn(format!(
+                    "could not check frozen dependency `{}` PR #{}; leaving bookmark in place: {error:#}",
+                    bookmark.name, bookmark.pr_number
+                ));
+                continue;
+            }
+        };
+        if !pr_was_merged(&pr) {
+            continue;
+        }
+        diagnostics.warn(format!(
+            "frozen dependency `{}` PR #{} is merged; pruning stale bookmark",
+            bookmark.name, bookmark.pr_number
+        ));
+        delete_bookmark(runner, &bookmark.name, diagnostics).await?;
+        deleted += 1;
+    }
+    // A plain delete only marks the bookmark deleted in a colocated repo; flush
+    // the removal into git so a later `frozen_bookmarks` list no longer resolves
+    // the stale name.
+    if deleted > 0 {
+        git_export(runner, diagnostics).await?;
+    }
+    Ok(deleted)
 }
 
 pub(crate) async fn prune_landed_duplicate_changes(
