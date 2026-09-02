@@ -767,6 +767,42 @@ pub(crate) async fn lookup_open_pr_by_head_branch(
     }
 }
 
+/// Look up the most recent PR for a head branch regardless of state.
+///
+/// `lookup_open_pr_by_head_branch` deliberately sees only open PRs, so a branch
+/// whose PR was closed or merged looks like a branch nobody owns. Submit uses
+/// this to explain that case instead of reporting a bare collision.
+#[tracing::instrument(skip_all, fields(head_branch = %head_branch))]
+pub(crate) async fn lookup_latest_pr_by_head_branch(
+    runner: &impl CommandRunner,
+    github: &GitHubContext,
+    head_branch: &str,
+) -> Result<Option<GhPr>> {
+    let args = [
+        "pr",
+        "list",
+        "--repo",
+        github.repo.as_str(),
+        "--head",
+        head_branch,
+        "--state",
+        "all",
+        "--json",
+        PR_JSON_FIELDS,
+        "--limit",
+        "10",
+    ];
+    let output = gh_run(runner, &args).await?;
+    if !output.success {
+        // This only ever decorates an error that is already being raised, so a
+        // failed lookup must not replace it with a worse one.
+        return Ok(None);
+    }
+
+    let prs = serde_json::from_str::<Vec<GhPr>>(&output.stdout).unwrap_or_default();
+    Ok(prs.into_iter().max_by_key(|pr| pr.number))
+}
+
 /// Rewrite a REST `state` into the GraphQL vocabulary the rest of the codebase
 /// compares against.
 ///

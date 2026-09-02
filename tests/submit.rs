@@ -998,3 +998,49 @@ fn submit_uses_adopted_branch_as_pr_head_without_cache() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+/// A stack reorder can push a PR's base branch to a commit that already
+/// contains the PR head, and GitHub retires the PR as MERGED the moment that
+/// lands. The open-PR lookup then sees nothing, so the branch looks like a
+/// collision nobody owns. Submit must name the retired PR and point at the
+/// recovery that does not delete the branch out from under the PRs stacked on
+/// top of it.
+#[test]
+fn submit_names_the_merged_pr_holding_the_head_branch() -> anyhow::Result<()> {
+    let repo = TestRepo::new("submit-merged-head-branch")?;
+    repo.init_main()?;
+    let change = repo.create_change("feature", "feature title", "feature body")?;
+    let branch = branch_for("feature-title", &change.change_id);
+    repo.set_bookmark(&branch, &change.commit_id)?;
+    repo.push_bookmark(&branch)?;
+
+    // The former base, now sitting above the change it used to be under.
+    let above = repo.create_change("above", "above title", "above body")?;
+    let above_branch = branch_for("above-title", &above.change_id);
+    repo.set_bookmark(&above_branch, &above.commit_id)?;
+    repo.push_bookmark(&above_branch)?;
+
+    // GitHub flips this to MERGED on its own: the base branch contains the head.
+    repo.seed_pr(7, &branch, &above_branch, "feature title", "feature body")?;
+
+    let output = repo.run(&["submit", "--yes"])?;
+    assert!(
+        !output.status.success(),
+        "submit should refuse to reuse a merged PR's branch\nstderr:\n{}",
+        stderr_of(&output)
+    );
+    let stderr = stderr_of(&output);
+    assert!(
+        stderr.contains("PR #7 is MERGED"),
+        "stderr should name the merged PR:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("stack reorder that moved this change below its former base"),
+        "stderr should explain how the PR got retired:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("forklift track"),
+        "stderr should point at the adopt-a-replacement-PR recovery:\n{stderr}"
+    );
+    Ok(())
+}

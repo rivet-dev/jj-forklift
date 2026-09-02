@@ -315,14 +315,41 @@ pub(crate) async fn resolve_submit_head_branch(
     }
 
     if let Some(remote_head) = &expected_remote_head {
-        bail!(CliError::new(format!(
-            "remote branch `{}` already exists at {} with no matching PR in the cache",
-            head_branch,
-            short_commit_id(remote_head)
-        ))
-        .resolution(
-            "run `forklift get` for the PR that owns it, delete the branch, or choose a different change title"
-        ));
+        // The open-PR lookup above cannot see a closed or merged PR, so a
+        // branch whose PR GitHub already retired looks like an unowned
+        // collision. Name the retired PR: it is the difference between "some
+        // stray branch is in the way" and "this change's PR is gone".
+        let retired_pr =
+            lookup_latest_pr_by_head_branch(runner, &context.github, &head_branch).await?;
+        let retired_pr = retired_pr.filter(|pr| !pr.state.eq_ignore_ascii_case("OPEN"));
+        let mut summary = match &retired_pr {
+            Some(pr) => format!(
+                "remote branch `{}` already exists at {}, but its PR #{} is {} and cannot be reused",
+                head_branch,
+                short_commit_id(remote_head),
+                pr.number,
+                pr.state
+            ),
+            None => format!(
+                "remote branch `{}` already exists at {} with no matching PR in the cache",
+                head_branch,
+                short_commit_id(remote_head)
+            ),
+        };
+        if retired_pr
+            .as_ref()
+            .is_some_and(|pr| pr.state.eq_ignore_ascii_case("MERGED"))
+        {
+            // GitHub retires a PR the moment its base branch is pushed to a
+            // commit that already contains the PR head. A stack reorder that
+            // moves a change below its own base does exactly that.
+            summary.push_str(
+                ". GitHub marks a PR merged as soon as its base branch contains the PR head, which is what a stack reorder that moved this change below its former base does",
+            );
+        }
+        bail!(CliError::new(summary).resolution(format!(
+            "open a replacement PR for the branch and adopt it: `gh pr create --head {head_branch} --base <base>` then `forklift track <pr>`. Do not delete the branch: GitHub closes every open PR based on it"
+        )));
     }
 
     used_head_branches.insert(head_branch.clone());

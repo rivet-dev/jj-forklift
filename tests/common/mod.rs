@@ -1051,6 +1051,8 @@ if args[:2] == ["api", "repos/owner/repo"] and "--jq" in args:
 if args[:2] == ["pr", "list"]:
     state = load_state()
     wanted = args[args.index("--state") + 1].upper() if "--state" in args else None
+    if wanted == "ALL":
+        wanted = None
     head = args[args.index("--head") + 1] if "--head" in args else None
     out = []
     for pr in state["prs"]:
