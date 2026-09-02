@@ -877,6 +877,9 @@ pub(crate) async fn submit_planned(
     // itself; the push phase below then skips snapshotting entirely).
     reconcile_plans_with_current_commits(runner, &mut plans).await?;
 
+    tracing::debug!(phase = "retarget-bases", "recovery phase");
+    retarget_prs_before_push(runner, config, context, &mut plans, diagnostics).await?;
+
     tracing::debug!(phase = "push-refs", "recovery phase");
     push_changed_heads(runner, config, &plans, diagnostics).await?;
 
@@ -1837,6 +1840,100 @@ pub(crate) async fn reconcile_plans_with_current_commits(
         }
     }
     Ok(())
+}
+
+/// Move every PR that this submit's push would retire off its doomed base.
+///
+/// GitHub marks a PR merged the instant its base branch contains the PR head,
+/// and submit pushes every changed head before it patches any PR base. So a
+/// reorder that moves a change below its former base force-pushes that base
+/// past the PR's own head, and GitHub closes the PR mid-submit: no error, no
+/// way to reopen it, and the change silently loses its PR. Park those PRs on
+/// trunk first, which can only contain a head that already merged. The regular
+/// update below then sets each final base once the push has landed.
+#[tracing::instrument(skip_all)]
+pub(crate) async fn retarget_prs_before_push(
+    runner: &impl CommandRunner,
+    config: &AppConfig,
+    context: &AppContext,
+    plans: &mut [SubmitPlan],
+    diagnostics: Diagnostics,
+) -> Result<()> {
+    let pushed_heads = plans
+        .iter()
+        .filter(|plan| plan.push_needed)
+        .map(|plan| {
+            (
+                plan.head_branch.clone(),
+                plan.change.commit_id.clone(),
+            )
+        })
+        .collect::<HashMap<String, String>>();
+    if pushed_heads.is_empty() {
+        return Ok(());
+    }
+
+    let mut doomed = Vec::new();
+    for (index, plan) in plans.iter().enumerate() {
+        let Some(existing) = &plan.existing_pr else {
+            continue;
+        };
+        // Only a base branch this submit is about to move can swallow a head.
+        let Some(base_after_push) = pushed_heads.get(&existing.base_branch) else {
+            continue;
+        };
+        if !commit_is_ancestor(runner, &plan.change.commit_id, base_after_push).await? {
+            continue;
+        }
+        doomed.push((index, existing.pr_number, existing.base_branch.clone()));
+    }
+    if doomed.is_empty() {
+        return Ok(());
+    }
+
+    for (index, pr_number, doomed_base) in doomed {
+        diagnostics.warn(format!(
+            "phase=retarget-bases object=pr:{pr_number} action=parked on `{}` because pushing `{doomed_base}` would move it past this PR's head and GitHub would mark the PR merged",
+            config.trunk
+        ));
+        retarget_pr_base(
+            runner,
+            &context.github,
+            pr_number,
+            &config.trunk,
+            &plans[index].change.change_id,
+            diagnostics,
+        )
+        .await?;
+        // The PR now sits on trunk, so the update below has to run even if
+        // nothing else about the PR changed, or it would stay parked.
+        plans[index].pr_update_needed = true;
+    }
+
+    Ok(())
+}
+
+/// Whether `commit` is an ancestor of `descendant` (a commit is its own
+/// ancestor, which is the answer we want: a base already sitting on the head
+/// has retired the PR).
+#[tracing::instrument(level = "trace", skip_all)]
+pub(crate) async fn commit_is_ancestor(
+    runner: &impl CommandRunner,
+    commit: &str,
+    descendant: &str,
+) -> Result<bool> {
+    let args = ["merge-base", "--is-ancestor", commit, descendant];
+    let output = git_run(runner, &args).await?;
+    // git answers "no" with exit code 1 and says nothing; anything on stderr is
+    // a real failure (an unknown commit, say) and must not read as "no".
+    if !output.success && !output.stderr.trim().is_empty() {
+        bail!(
+            "`{}` failed while checking whether a push would swallow a PR head: {}",
+            display_command("git", &args),
+            output.stderr.trim()
+        );
+    }
+    Ok(output.success)
 }
 
 pub(crate) async fn push_changed_heads(

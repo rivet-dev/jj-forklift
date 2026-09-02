@@ -1147,6 +1147,13 @@ if args[:3] == ["api", "-X", "PATCH"] and args[3].startswith("repos/owner/repo/p
     if pr is None:
         print("not found", file=sys.stderr)
         sys.exit(1)
+    # Real GitHub retires a PR the moment its base branch is pushed to a commit
+    # containing the PR head, and then refuses to patch it. Resolve state
+    # against the remote *before* applying this patch so a caller that pushed
+    # first and patched second hits the same 422 it would hit for real.
+    if resolve_state(state, pr).upper() != "OPEN":
+        print("gh: Validation Failed (HTTP 422)", file=sys.stderr)
+        sys.exit(1)
     values = field_values()
     pr["baseRefName"] = values.get("base", pr["baseRefName"])
     pr["title"] = values.get("title", pr.get("title", ""))

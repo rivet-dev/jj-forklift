@@ -1044,3 +1044,44 @@ fn submit_names_the_merged_pr_holding_the_head_branch() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+/// Reordering a change below its own base makes the next submit force-push that
+/// base branch past the PR's head, and GitHub retires the PR as merged the
+/// moment that lands: no error, nothing to reopen, and the change silently
+/// loses its PR. Submit must move the endangered PR off that base before it
+/// pushes anything. Reproduced end-to-end with a real `jj rebase`; the fake
+/// `gh` applies GitHub's own base-contains-head rule, so a regression here
+/// really does retire the PR.
+#[test]
+fn submit_parks_a_pr_its_own_push_would_retire() -> anyhow::Result<()> {
+    let repo = TestRepo::new("submit-reorder-auto-merge")?;
+    repo.init_main()?;
+    let stack = repo.create_linear_stack(2)?;
+    let lower = branch_for("change-1-title", &stack[0].change_id);
+    let upper = branch_for("change-2-title", &stack[1].change_id);
+    repo.seed_pr_number(&lower, 11)?;
+    repo.seed_pr_number(&upper, 12)?;
+
+    assert_success("initial submit", &repo.run(&["submit", "--yes"])?);
+    assert_eq!(repo.stored_pr(12)?["baseRefName"], json!(lower));
+
+    // Swap them: the lower change moves above the change whose PR is based on
+    // it, so pushing `lower` now drags PR #12's base past PR #12's own head.
+    repo.jj(&["rebase", "-r", &stack[0].change_id, "-d", &stack[1].change_id])?;
+    repo.jj(&["edit", &stack[0].change_id])?;
+
+    let output = repo.run(&["submit", "--yes"])?;
+    assert_success("submit after reorder", &output);
+
+    // The endangered PR survived and now sits under the change it follows.
+    assert_eq!(
+        repo.stored_pr(12)?["state"],
+        json!("OPEN"),
+        "the reorder must not retire PR #12"
+    );
+    assert_eq!(repo.stored_pr(12)?["baseRefName"], json!("main"));
+    // And the change that moved above it is stacked on top.
+    assert_eq!(repo.stored_pr(11)?["state"], json!("OPEN"));
+    assert_eq!(repo.stored_pr(11)?["baseRefName"], json!(upper));
+    Ok(())
+}

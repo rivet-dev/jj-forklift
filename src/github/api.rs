@@ -62,6 +62,36 @@ pub(crate) async fn update_pr(
     run_pr_api(runner, &args, "update", &plan.change.change_id, diagnostics).await
 }
 
+/// Patch only a PR's base branch.
+///
+/// Submit uses this to move a PR off a base branch it is about to force-push
+/// past that PR's own head. The full [`update_pr`] below still runs afterwards
+/// and sets the final base, title, and body.
+#[tracing::instrument(skip_all, fields(pr = pr_number))]
+pub(crate) async fn retarget_pr_base(
+    runner: &impl CommandRunner,
+    github: &GitHubContext,
+    pr_number: u64,
+    base_branch: &str,
+    change_id: &str,
+    diagnostics: Diagnostics,
+) -> Result<GhPr> {
+    let base = format!("base={base_branch}");
+    let endpoint = format!("repos/{}/pulls/{}", github.repo, pr_number);
+    let args = [
+        "api",
+        "-X",
+        "PATCH",
+        endpoint.as_str(),
+        "-f",
+        base.as_str(),
+        "--jq",
+        PR_API_JQ,
+    ];
+
+    run_pr_api(runner, &args, "retarget", change_id, diagnostics).await
+}
+
 #[tracing::instrument(skip_all, fields(action = %action, change = %change_id))]
 pub(crate) async fn run_pr_api(
     runner: &impl CommandRunner,
