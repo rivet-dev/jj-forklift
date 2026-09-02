@@ -2,15 +2,20 @@ pub mod app;
 
 use serde::Deserialize;
 
-/// Revset that scopes a view (e.g. `forklift ui`) to the stacks forklift tracks:
-/// trunk plus every commit between trunk and the working copy, any local
-/// `<prefix>/*` head bookmark created by submit, any `forklift/frozen/*`
-/// dependency bookmark, and any commit stacked on top of the working copy
-/// (`@::`). This is the `jjui` analogue of Graphite's tracked-branches view.
+/// Revset that scopes a view (e.g. `forklift ui`) to every stack off trunk, the
+/// `jjui` analogue of Graphite's view of all stacks plus the current one.
+///
+/// `mutable()` is what makes sibling stacks visible: it covers every un-merged
+/// commit regardless of whether submit has bookmarked it, so a stack branching
+/// off the middle of the current one (or a bookmark-less scratch stack) still
+/// shows up instead of being hidden because the working copy sits elsewhere.
+/// The rest is belt-and-braces for commits `mutable()` cannot reach: trunk
+/// itself, the working copy and its descendants (`@::`), and any local
+/// `<prefix>/*` submit head or `forklift/frozen/*` dependency bookmark.
 pub fn tracked_stacks_revset(branch_prefix: &str) -> String {
     let prefix = branch_prefix.trim_end_matches('/');
     format!(
-        "trunk() | @:: | trunk()..(@ | bookmarks(glob:'{prefix}/*') | bookmarks(glob:'forklift/frozen/*'))"
+        "trunk() | @:: | mutable() | trunk()..(@ | bookmarks(glob:'{prefix}/*') | bookmarks(glob:'forklift/frozen/*'))"
     )
 }
 
