@@ -27,6 +27,7 @@ pub(crate) async fn run(
     if options.target.is_none() && !options.current {
         let summary =
             sync_all_stacks(runner, &config, options.submit, options.yes, diagnostics).await?;
+        reconcile_git_refs_after_sync(runner, diagnostics, dry_run).await;
         let verb = if dry_run { "sync (dry run)" } else { "sync" };
         let failed_note = if summary.failed > 0 {
             format!(", {} stack(s) failed", summary.failed)
@@ -79,6 +80,7 @@ pub(crate) async fn run(
         diagnostics,
     )
     .await?;
+    reconcile_git_refs_after_sync(runner, diagnostics, dry_run).await;
     if dry_run {
         ui_progress(
             "Finished",
@@ -126,6 +128,34 @@ async fn unfreeze_all_dependencies(
         unfreeze_stack(runner, config, &bookmark.pr_number.to_string(), diagnostics).await?;
     }
     Ok(frozen.len())
+}
+
+/// Best-effort divergence guard, run after every real sync: flush jj's pending
+/// bookmark moves into the colocated `refs/heads/*`. Forklift mutates bookmarks
+/// from whichever workspace it runs in, and a secondary (non-colocated) workspace
+/// does not auto-export those moves into the primary's `.git`. Left un-exported, a
+/// stack ref lingers at a pre-rewrite commit; a later `jj git import` (which every
+/// `jj git fetch`, and even a plain `jj log`, performs) can resurrect that old
+/// commit, and if its rewritten copy is kept alive — e.g. it merged to trunk — the
+/// change becomes divergent and every subsequent sync bails on it. The import that
+/// does the damage fires on the *first* jj command of the next invocation, before
+/// any in-run guard could act, so the fix is to never leave a stale ref behind.
+/// Never fails the sync — an export hiccup only risks the drift it was clearing,
+/// and the summary/exit code already stand. Skipped on dry runs, which mutate
+/// nothing.
+async fn reconcile_git_refs_after_sync(
+    runner: &impl CommandRunner,
+    diagnostics: Diagnostics,
+    dry_run: bool,
+) {
+    if dry_run {
+        return;
+    }
+    if let Err(error) = git_export(runner, diagnostics).await {
+        diagnostics.warn(format!(
+            "could not export bookmarks to git after sync (harmless; drift may cause a future divergence warning): {error:#}"
+        ));
+    }
 }
 
 fn submit_state(submit_ran: bool, dry_run: bool) -> &'static str {

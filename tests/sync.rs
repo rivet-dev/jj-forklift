@@ -25,6 +25,68 @@ fn sync_rebases_then_submits() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A sync run from a secondary (non-colocated) jj workspace rebases the stack —
+/// moving the stack bookmark — but that move is not auto-exported into the
+/// primary's `.git`. Left stale, the colocated ref would later be re-imported and
+/// resurrect the pre-rebase commit, turning the change divergent. The post-sync
+/// reconcile must flush jj's bookmark truth into the colocated ref so it never
+/// drifts. Guards `reconcile_managed_git_refs`.
+#[test]
+fn sync_from_secondary_workspace_leaves_no_stale_stack_ref() -> anyhow::Result<()> {
+    let repo = TestRepo::new("sync-secondary-stale-ref")?;
+    repo.init_main()?;
+    let change = repo.create_change("change", "change title", "change body")?;
+    let branch = branch_for("change-title", &change.change_id);
+    repo.seed_pr_number(&branch, 9)?;
+    // Submit from the primary workspace to create and push the stack bookmark.
+    assert_success("submit", &repo.run(&["submit", "--yes"])?);
+    // Advance remote trunk so the next sync actually rebases (and thus moves the
+    // stack bookmark).
+    repo.advance_remote_trunk("remote work", &change.change_id)?;
+
+    // Run sync from a second, non-colocated workspace — the configuration that
+    // silently leaves the primary's colocated ref behind.
+    let secondary = repo.root.join("secondary");
+    repo.jj(&["workspace", "add", secondary.to_str().unwrap()])?;
+    assert_success(
+        "sync from secondary",
+        &repo.run_in(&secondary, &["sync", "--yes"])?,
+    );
+
+    // Operations ran in the secondary workspace, so the primary's working copy is
+    // now stale; refresh it before inspecting state from there.
+    repo.jj(&["workspace", "update-stale"])?;
+
+    // jj rebased the bookmark forward; the colocated git ref (`<branch>@git`) must
+    // have been reconciled to match it rather than left at the pre-rebase commit.
+    let rebased = repo.change_at(&change.change_id)?;
+    let bookmark = repo.bookmark_target(&branch)?;
+    assert_eq!(
+        bookmark, rebased.commit_id,
+        "stack bookmark should track the rebased change"
+    );
+    let git_ref = repo.rev_commit_id(&format!("{branch}@git"))?;
+    assert_eq!(
+        git_ref, bookmark,
+        "colocated git ref must be reconciled to the bookmark, not left stale"
+    );
+
+    // And no change should have been left divergent.
+    let divergent = repo.jj_stdout(&[
+        "log",
+        "-r",
+        "divergent()",
+        "--no-graph",
+        "-T",
+        "change_id ++ \"\\n\"",
+    ])?;
+    assert!(
+        divergent.trim().is_empty(),
+        "no change should be divergent, got:\n{divergent}"
+    );
+    Ok(())
+}
+
 #[test]
 fn sync_prompts_to_submit_clean_rebase() -> anyhow::Result<()> {
     let repo = TestRepo::new("sync-prompt-submit")?;
