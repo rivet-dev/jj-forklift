@@ -155,6 +155,15 @@ pub(crate) async fn sync_stack(
         .await
         .map_err(|error| phase_error("cleanup-merged", "frozen bookmarks", error))?;
 
+    // Auto-resolve divergent changes (e.g. a merged PR's commit returning on trunk
+    // as a twin of the still-bookmarked local copy) before the resolver below trips
+    // over the ambiguous head. Lossless duplicates are abandoned; changes whose
+    // copies differ in content are left for the user.
+    diagnostics.phase("resolve-divergence");
+    resolve_divergences(runner, config, yes, diagnostics)
+        .await
+        .map_err(|error| phase_error("resolve-divergence", revset, error))?;
+
     diagnostics.phase("resolve-stack");
     resolve_single_rev(runner, "trunk()")
         .await
@@ -461,6 +470,246 @@ pub(crate) async fn cleanup_merged_frozen_bookmarks(
         git_export(runner, diagnostics).await?;
     }
     Ok(deleted)
+}
+
+/// One visible commit of a divergent change.
+struct DivergentCopy {
+    commit_id: String,
+    tree_id: String,
+    immutable: bool,
+    on_trunk: bool,
+    bookmarks: Vec<String>,
+    description: String,
+}
+
+impl DivergentCopy {
+    /// Higher wins when choosing which copy to keep: the copy merged onto trunk is
+    /// canonical, then a frozen (immutable) copy, then a bookmarked one, then any.
+    fn authority(&self) -> u8 {
+        if self.on_trunk {
+            3
+        } else if self.immutable {
+            2
+        } else if !self.bookmarks.is_empty() {
+            1
+        } else {
+            0
+        }
+    }
+
+    /// Human-readable identifier for prompts and warnings: the short commit id, its
+    /// bookmark(s) or a place tag so a bare commit id is never shown alone, and the
+    /// change's description. Lets the user recognise which copy is which without
+    /// having to look the raw revision up.
+    fn label(&self) -> String {
+        let mut head = short_commit_id(&self.commit_id).to_string();
+        if !self.bookmarks.is_empty() {
+            head.push_str(&format!(" [{}]", self.bookmarks.join(", ")));
+        }
+        let tag = if self.on_trunk {
+            Some("on trunk")
+        } else if self.immutable {
+            Some("frozen")
+        } else if self.bookmarks.is_empty() {
+            Some("no bookmark")
+        } else {
+            None
+        };
+        if let Some(tag) = tag {
+            head.push_str(&format!(" ({tag})"));
+        }
+        if self.description.is_empty() {
+            head
+        } else {
+            format!("{head} — {}", self.description)
+        }
+    }
+}
+
+/// Auto-resolve divergent changes that would otherwise make the stack resolver
+/// bail. For every change with a copy in the mutable tracked scope that jj reports
+/// as divergent, keep the most authoritative copy (see [`DivergentCopy::authority`])
+/// and abandon any *other* copy whose tree is byte-identical to it — a provably
+/// lossless dedup. This is the common case: a merged PR's commit reappears on trunk
+/// as a twin of the still-bookmarked local copy, or a bookmark was resurrected onto
+/// a pre-rewrite commit. Copies whose content actually differs are never abandoned
+/// automatically — on a tty we ask, otherwise we warn and leave the change (the
+/// stack then fails as before, so no unique work is ever destroyed unattended).
+/// Returns the number of copies abandoned.
+pub(crate) async fn resolve_divergences(
+    runner: &impl CommandRunner,
+    config: &AppConfig,
+    yes: bool,
+    diagnostics: Diagnostics,
+) -> Result<usize> {
+    let prefix = config.branch_prefix.trim_end_matches('/');
+    let scope = format!("divergent() & (trunk()..(@ | bookmarks(glob:'{prefix}/*')))");
+    let change_ids = distinct_divergent_change_ids(runner, &scope).await?;
+    if change_ids.is_empty() {
+        return Ok(0);
+    }
+
+    let mut to_abandon: Vec<String> = Vec::new();
+    for change_id in &change_ids {
+        let copies = divergent_copies(runner, change_id).await?;
+        // Resolved out from under us (e.g. by an earlier change in this same pass).
+        if copies.len() < 2 {
+            continue;
+        }
+        let keep_idx = copies
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, copy)| copy.authority())
+            .map(|(index, _)| index)
+            .expect("at least two copies");
+        let keep = &copies[keep_idx];
+        for (index, other) in copies.iter().enumerate() {
+            if index == keep_idx {
+                continue;
+            }
+            let identical = other.tree_id == keep.tree_id;
+            if other.immutable {
+                // Can't abandon an immutable copy. Identical ones are harmless; a
+                // differing second on-trunk copy is a genuine oddity worth surfacing.
+                if !identical {
+                    diagnostics.warn(format!(
+                        "change {} has two differing immutable copies ({} and {}); leaving both",
+                        short_change_id(change_id),
+                        short_commit_id(&keep.commit_id),
+                        short_commit_id(&other.commit_id),
+                    ));
+                }
+                continue;
+            }
+            if identical {
+                ui_warn_line(&format!(
+                    "change {} is divergent; abandoning identical duplicate {} (keeping {})",
+                    short_change_id(change_id),
+                    other.label(),
+                    keep.label(),
+                ));
+                to_abandon.push(other.commit_id.clone());
+            } else if !yes && io::stdin().is_terminal() && prompt_abandon_divergent(change_id, keep, other)? {
+                to_abandon.push(other.commit_id.clone());
+            } else {
+                ui_warn_line(&format!(
+                    "change {} is divergent with differing content:\n  kept:  {}\n  extra: {} — has unique edits, leaving it (reconcile the edits, or `jj abandon {}` to drop them)",
+                    short_change_id(change_id),
+                    keep.label(),
+                    other.label(),
+                    short_commit_id(&other.commit_id),
+                ));
+            }
+        }
+    }
+
+    if to_abandon.is_empty() {
+        return Ok(0);
+    }
+
+    let mut args = vec!["abandon"];
+    args.extend(to_abandon.iter().map(String::as_str));
+    if diagnostics.dry_run {
+        diagnostics.plan_line(&format!("{}", display_command("jj", &args)));
+        return Ok(to_abandon.len());
+    }
+    diagnostics.command("jj", &args);
+    let output = runner.run("jj", &args).await?;
+    if !output.success {
+        bail!(
+            "failed-command=`{}` error={}",
+            display_command("jj", &args),
+            output.stderr.trim()
+        );
+    }
+    Ok(to_abandon.len())
+}
+
+/// Distinct change ids matching `scope`, in first-seen order. `jj log` lists one
+/// row per commit, so a divergent change appears once per copy; dedup here.
+async fn distinct_divergent_change_ids(
+    runner: &impl CommandRunner,
+    scope: &str,
+) -> Result<Vec<String>> {
+    let args = ["log", "--no-graph", "-r", scope, "-T", "change_id ++ \"\\n\""];
+    let output = runner.run("jj", &args).await?;
+    if !output.success {
+        bail!(
+            "failed-command=`{}` error={}",
+            display_command("jj", &args),
+            output.stderr.trim()
+        );
+    }
+    let mut ids = Vec::new();
+    let mut seen = HashSet::new();
+    for line in output.stdout.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        if seen.insert(line.to_owned()) {
+            ids.push(line.to_owned());
+        }
+    }
+    Ok(ids)
+}
+
+/// Every visible commit of `change_id`, with the facts needed to pick a keeper and
+/// test for lossless duplication.
+async fn divergent_copies(
+    runner: &impl CommandRunner,
+    change_id: &str,
+) -> Result<Vec<DivergentCopy>> {
+    let template = "commit_id ++ \"\\x1f\" ++ if(immutable,\"1\",\"0\") ++ \"\\x1f\" ++ if(self.contained_in(\"::trunk()\"),\"1\",\"0\") ++ \"\\x1f\" ++ bookmarks.map(|b| b.name()).join(\",\") ++ \"\\x1f\" ++ description.first_line() ++ \"\\n\"";
+    let selector = format!("change_id({change_id})");
+    let args = ["log", "--no-graph", "-r", &selector, "-T", template];
+    let output = runner.run("jj", &args).await?;
+    if !output.success {
+        bail!(
+            "failed-command=`{}` error={}",
+            display_command("jj", &args),
+            output.stderr.trim()
+        );
+    }
+    let mut copies = Vec::new();
+    for line in output.stdout.lines().filter(|l| !l.is_empty()) {
+        let fields = line.split('\x1f').collect::<Vec<_>>();
+        if fields.len() != 5 {
+            bail!("expected 5 divergent-copy fields, got {}", fields.len());
+        }
+        let commit_id = fields[0].to_owned();
+        let tree_id = resolve_tree_id(runner, &commit_id).await?;
+        copies.push(DivergentCopy {
+            immutable: fields[1] == "1",
+            on_trunk: fields[2] == "1",
+            bookmarks: fields[3]
+                .split(',')
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .collect(),
+            description: fields[4].to_owned(),
+            commit_id,
+            tree_id,
+        });
+    }
+    Ok(copies)
+}
+
+/// Ask whether to abandon the differing local copy of a divergent change, dropping
+/// its unique edits. Gated by the caller on an interactive tty.
+fn prompt_abandon_divergent(
+    change_id: &str,
+    keep: &DivergentCopy,
+    other: &DivergentCopy,
+) -> Result<bool> {
+    eprint!(
+        "change {} is divergent:\n  keep:    {}\n  abandon: {}  (has unique edits that will be lost)\nabandon the copy with unique edits? [y/N] ",
+        short_change_id(change_id),
+        keep.label(),
+        other.label(),
+    );
+    io::stderr().flush().context("flush divergence prompt")?;
+    let mut answer = String::new();
+    io::stdin()
+        .read_line(&mut answer)
+        .context("read divergence prompt")?;
+    Ok(matches!(answer.trim(), "y" | "Y" | "yes" | "YES" | "Yes"))
 }
 
 pub(crate) async fn prune_landed_duplicate_changes(

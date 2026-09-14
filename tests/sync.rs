@@ -87,6 +87,86 @@ fn sync_from_secondary_workspace_leaves_no_stale_stack_ref() -> anyhow::Result<(
     Ok(())
 }
 
+/// A divergent change whose two copies are byte-identical (e.g. a merged PR's
+/// commit returning on trunk as a twin of the still-bookmarked local copy) is
+/// auto-resolved: sync abandons the redundant copy and proceeds. Guards
+/// `resolve_divergences`.
+#[test]
+fn sync_auto_abandons_identical_divergent_copy() -> anyhow::Result<()> {
+    let repo = TestRepo::new("sync-diverge-identical")?;
+    repo.init_main()?;
+    let change = repo.create_change("a", "a title", "a body")?;
+    let branch = branch_for("a-title", &change.change_id);
+    repo.seed_pr_number(&branch, 11)?;
+    assert_success("submit", &repo.run(&["submit", "--yes"])?);
+
+    // Fabricate a divergent change with two *identical* copies: move `@` off the
+    // change, reword it (message-only, same tree) so the bookmark advances, anchor
+    // the new copy, then resurrect the original commit via its git ref.
+    let original = repo.rev_commit_id(&branch)?;
+    repo.jj(&["new"])?;
+    repo.jj(&["describe", "-r", &branch, "-m", "a title\n\nreworded"])?;
+    repo.jj(&["bookmark", "set", "anchor", "-r", &branch])?;
+    repo.set_local_git_branch(&branch, &original)?;
+    repo.jj(&["git", "import"])?;
+    assert_eq!(
+        repo.divergent_copy_count(&change.change_id)?,
+        2,
+        "test setup should produce a divergent change with two copies"
+    );
+
+    assert_success("sync", &repo.run(&["sync"])?);
+
+    assert_eq!(
+        repo.divergent_copy_count(&change.change_id)?,
+        1,
+        "the identical duplicate should have been abandoned"
+    );
+    Ok(())
+}
+
+/// A divergent change whose copies differ in content is never abandoned
+/// automatically (non-interactive): both copies survive so no unique work is lost,
+/// and sync surfaces the change for the user.
+#[test]
+fn sync_preserves_divergent_copy_with_differing_content() -> anyhow::Result<()> {
+    let repo = TestRepo::new("sync-diverge-differ")?;
+    repo.init_main()?;
+    let change = repo.create_change("a", "a title", "a body")?;
+    let branch = branch_for("a-title", &change.change_id);
+    repo.seed_pr_number(&branch, 11)?;
+    assert_success("submit", &repo.run(&["submit", "--yes"])?);
+
+    // Fabricate a divergent change whose two copies have *different* trees: rewrite
+    // the change's content, anchor the new copy, then resurrect the original commit.
+    let original = repo.rev_commit_id(&branch)?;
+    repo.jj(&["edit", &branch])?;
+    repo.write_file("a.txt", "different content\n")?;
+    repo.jj(&["new"])?;
+    repo.jj(&["bookmark", "set", "anchor", "-r", &branch])?;
+    repo.set_local_git_branch(&branch, &original)?;
+    repo.jj(&["git", "import"])?;
+    assert_eq!(
+        repo.divergent_copy_count(&change.change_id)?,
+        2,
+        "test setup should produce a divergent change with two differing copies"
+    );
+
+    // Non-interactive: the differing change must not be auto-abandoned, so this
+    // stack still fails to resolve and sync exits non-zero.
+    let output = repo.run(&["sync"])?;
+    assert!(
+        !output.status.success(),
+        "sync should fail on an unresolved differing divergence"
+    );
+    assert_eq!(
+        repo.divergent_copy_count(&change.change_id)?,
+        2,
+        "both differing copies must be preserved — no unique work destroyed"
+    );
+    Ok(())
+}
+
 #[test]
 fn sync_prompts_to_submit_clean_rebase() -> anyhow::Result<()> {
     let repo = TestRepo::new("sync-prompt-submit")?;

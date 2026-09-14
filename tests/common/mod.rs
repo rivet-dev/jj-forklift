@@ -288,6 +288,16 @@ impl TestRepo {
         run_ok_in(&self.work, "jj", &["git", "fetch", "--remote", "origin"])
     }
 
+    /// Force a local git branch ref to a commit, bypassing jj — used to fabricate
+    /// the stale/resurrected ref that produces a divergent change.
+    pub fn set_local_git_branch(&self, name: &str, commit: &str) -> anyhow::Result<()> {
+        run_ok_in(
+            &self.work,
+            "git",
+            &["update-ref", &format!("refs/heads/{name}"), commit],
+        )
+    }
+
     /// Fast-forward the *remote* trunk by one commit while leaving the local
     /// trunk bookmark and working copy where they were. `restore_rev` is the
     /// revision `@` should point at afterwards (typically the stack being
@@ -433,6 +443,24 @@ impl TestRepo {
             &["ls-remote", "origin", &format!("refs/heads/{name}")],
         )?;
         Ok(!output.trim().is_empty())
+    }
+
+    /// Number of visible commits sharing `change_id` — >1 means the change is
+    /// divergent.
+    pub fn divergent_copy_count(&self, change_id: &str) -> anyhow::Result<usize> {
+        let out = run_stdout_in(
+            &self.work,
+            "jj",
+            &[
+                "log",
+                "--no-graph",
+                "-r",
+                &format!("change_id({change_id})"),
+                "-T",
+                "commit_id ++ \"\\n\"",
+            ],
+        )?;
+        Ok(out.lines().filter(|line| !line.trim().is_empty()).count())
     }
 
     pub fn bookmark_exists(&self, name: &str) -> anyhow::Result<bool> {
